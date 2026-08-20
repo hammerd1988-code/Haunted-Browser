@@ -163,27 +163,28 @@ downloads in the background and installs on the next restart (or immediately via
 the "Restart to update" button). This only runs in a packaged build — in dev
 mode (`npm run electron`) it's disabled.
 
-To serve updates you need a **release channel**: a static URL hosting the
-`latest.yml` metadata file plus each version's installer. The simplest options:
+Updates use the project's **GitHub Releases** channel. Pushing a version tag
+builds and publishes separate Windows x64, Linux x64, macOS Intel, and macOS
+Apple Silicon installers through `.github/workflows/release.yml`.
 
-**Option A — any static host (generic provider, already configured as a placeholder):**
-
-1. Set the URL in `package.json` → `build.publish.url` (replace
-   `https://example.com/casper-updates/`).
-2. Build: `npm run dist:win` (or `dist:linux`).
-3. Upload everything in `release/` (the installer **and** `latest.yml`) to that URL.
-4. Bump `version` in `package.json` for each release and re-publish.
-
-**Option B — GitHub Releases (auto-uploads with a token):**
-
-Replace the `publish` block in `package.json` with:
-
-```json
-"publish": { "provider": "github", "owner": "YOUR_GH_USER", "repo": "casper-browser" }
+```bash
+npm version patch
+git push origin main --follow-tags
 ```
 
-Then `GH_TOKEN=<your-token> npm run dist:publish:win` builds **and** uploads the
-installer + `latest.yml` to a GitHub Release in one step.
+The workflow runs each build on its native operating system, publishes the
+installers and update metadata to the matching GitHub release, and uses
+architecture-specific filenames.
+
+To use a generic static update host instead, replace the `publish` block in
+`package.json` with:
+
+```json
+"publish": { "provider": "generic", "url": "https://downloads.example.com/haunted-browser/" }
+```
+
+Then build locally and upload each installer plus its generated `latest*.yml`
+metadata file to that URL.
 
 Notes:
 - `better-sqlite3` ships Electron-compatible prebuilt binaries, so no C++ build tools are
@@ -191,9 +192,8 @@ Notes:
 - The optional `bufferutil` dependency was removed (it's not needed; `ws` falls back to pure JS).
 - `electron-builder` and `electron-updater` are dev/production dependencies respectively —
   they won't be installed for end users who just run the built installer.
-- Until a real release channel is configured, the launch auto-check is skipped
-  (the app detects the placeholder URL). Manual "Check for updates" in Settings
-  still works and will report an error until a real channel is set — harmless.
+- Auto-update checks use the public GitHub Releases feed. Signed installers are
+  recommended before distributing Haunted Browser beyond development testing.
 - For seamless Windows updates with no SmartScreen warnings, sign the installer with an
   Authenticode certificate (optional for a personal/local prototype).
 

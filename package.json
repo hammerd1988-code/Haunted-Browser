@@ -146,11 +146,13 @@
       "node_modules/better-sqlite3/**"
     ],
     "publish": {
-      "provider": "generic",
-      "url": "https://example.com/casper-updates/"
+      "provider": "github",
+      "owner": "hammerd1988-code",
+      "repo": "Haunted-Browser"
     },
     "win": {
       "icon": "build-resources/icon.ico",
+      "artifactName": "${productName}-${version}-windows-${arch}.${ext}",
       "target": [
         {
           "target": "nsis",
@@ -168,12 +170,14 @@
       "shortcutName": "Haunted Browser"
     },
     "linux": {
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}",
       "target": [
         "AppImage"
       ],
       "category": "Network"
     },
     "mac": {
+      "artifactName": "${productName}-${version}-macos-${arch}.${ext}",
       "target": [
         "dmg"
       ],
