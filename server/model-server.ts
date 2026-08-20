@@ -214,7 +214,7 @@ function preferIpv4Origin(origin: string): string {
 }
 
 function unique(items: string[]): string[] {
-  return [...new Set(items)];
+  return Array.from(new Set(items));
 }
 
 function errorCode(err: unknown): string | undefined {
