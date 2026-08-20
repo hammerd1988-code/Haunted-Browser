@@ -13,6 +13,7 @@ export function SettingsDialog({
   status,
   ollamaUrl,
   model,
+  apiKey,
   onSave,
   onTest,
 }: {
@@ -21,11 +22,13 @@ export function SettingsDialog({
   status: CasperStatus;
   ollamaUrl: string;
   model: string;
-  onSave: (ollamaUrl: string, model: string) => void;
-  onTest: (url: string) => void;
+  apiKey: string;
+  onSave: (ollamaUrl: string, model: string, apiKey: string) => void;
+  onTest: (url: string, opts?: { discover?: boolean }) => Promise<CasperStatus | void> | void;
 }) {
   const [draftUrl, setDraftUrl] = useState(ollamaUrl);
   const [draftModel, setDraftModel] = useState(model);
+  const [draftKey, setDraftKey] = useState(apiKey);
   const [testing, setTesting] = useState(false);
   const [update, setUpdate] = useState<{ type: string; version?: string; message?: string; percent?: number } | null>(null);
 
@@ -35,8 +38,9 @@ export function SettingsDialog({
     if (open) {
       setDraftUrl(ollamaUrl);
       setDraftModel(model);
+      setDraftKey(apiKey);
     }
-  }, [open, ollamaUrl, model]);
+  }, [open, ollamaUrl, model, apiKey]);
 
   useEffect(() => {
     const bridge = (window as any).casperElectron;
@@ -46,6 +50,17 @@ export function SettingsDialog({
   }, []);
 
   const models = status.models;
+
+  async function runTest(discover = false) {
+    setTesting(true);
+    try {
+      const result = await onTest(draftUrl, { discover });
+      if (result?.origin) setDraftUrl(result.origin);
+      if (result?.models?.length && !draftModel) setDraftModel(result.models[0]);
+    } finally {
+      setTesting(false);
+    }
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -68,11 +83,12 @@ export function SettingsDialog({
               data-testid="input-ollama-url"
               value={draftUrl}
               onChange={(e) => setDraftUrl(e.target.value)}
-              placeholder="http://localhost:1234"
+              placeholder="http://127.0.0.1:1234"
             />
             <p className="text-xs text-muted-foreground">
-              LM Studio defaults to <code className="font-mono">http://localhost:1234</code> (start its Local
-              Server and load a model). Ollama uses <code className="font-mono">http://localhost:11434</code>.
+              LM Studio: open the <strong>Developer</strong> tab, start the local server, and load a
+              chat model. Default is <code className="font-mono">http://127.0.0.1:1234</code>. Ollama
+              uses <code className="font-mono">http://127.0.0.1:11434</code>.
             </p>
           </div>
 
@@ -96,20 +112,33 @@ export function SettingsDialog({
                 </span>
               )}
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={testing}
-              onClick={async () => {
-                setTesting(true);
-                await onTest(draftUrl);
-                setTesting(false);
-              }}
-              className="mt-1"
-            >
-              Test connection
-            </Button>
+            {(status.error || status.hint) && (
+              <p className="text-xs text-amber-500/90" data-testid="text-connection-hint">
+                {status.error}
+                {status.error && status.hint ? " — " : ""}
+                {status.hint}
+              </p>
+            )}
+            <div className="flex items-center gap-2 mt-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={testing}
+                onClick={() => runTest(false)}
+              >
+                Test connection
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={testing}
+                onClick={() => runTest(true)}
+              >
+                Find my server
+              </Button>
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -139,6 +168,22 @@ export function SettingsDialog({
             <p className="text-xs text-muted-foreground">
               Pick a model from your LM Studio / Ollama server, or type a name. The loaded model is used
               automatically.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="api-key">API token (optional)</Label>
+            <Input
+              id="api-key"
+              data-testid="input-api-key"
+              type="password"
+              autoComplete="off"
+              value={draftKey}
+              onChange={(e) => setDraftKey(e.target.value)}
+              placeholder="Only if LM Studio requires authentication"
+            />
+            <p className="text-xs text-muted-foreground">
+              Leave blank unless you enabled an API token in LM Studio → Developer → server settings.
             </p>
           </div>
 
@@ -214,7 +259,7 @@ export function SettingsDialog({
           </Button>
           <Button
             onClick={() => {
-              onSave(draftUrl, draftModel || "llama3.2");
+              onSave(draftUrl, draftModel || models[0] || "", draftKey);
               onOpenChange(false);
             }}
           >

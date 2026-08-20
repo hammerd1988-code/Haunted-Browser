@@ -1,6 +1,12 @@
 import type { Express } from "express";
 import type { Server } from "node:http";
 import { storage } from "./storage";
+import {
+  DEFAULT_MODEL_URL,
+  modelHeaders,
+  probeModelServer,
+  stripToOrigin,
+} from "./model-server";
 
 /* ------------------------------------------------------------------ */
 /* Casper — the ghost who haunts Haunted Browser.                      */
@@ -77,68 +83,75 @@ function buildCasperPrompt(opts: { localHour?: number; history: { role: string; 
 }
 
 
-function normalizeBase(raw: string): string {
-  let b = (raw || "").trim().replace(/\/+$/, "");
-  if (!b) b = "http://localhost:11434";
-  // ensure it ends with /v1 if the user gave a bare host
-  if (!/\/v\d+$/.test(b)) b = `${b}/v1`;
-  return b;
+async function loadModelSettings() {
+  const all = await storage.getAllSettings();
+  return {
+    ollamaUrl: all.ollamaUrl || DEFAULT_MODEL_URL,
+    model: all.model || "",
+    apiKey: all.apiKey || "",
+  };
 }
 
-async function fetchModels(baseUrl: string, timeoutMs = 2500): Promise<string[]> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+async function probeSavedServer(opts: { url?: string; discover?: boolean; timeoutMs?: number } = {}) {
+  const saved = await loadModelSettings();
+  return probeModelServer({
+    url: opts.url || saved.ollamaUrl,
+    apiKey: saved.apiKey,
+    discover: opts.discover,
+    timeoutMs: opts.timeoutMs,
+  });
+}
+
+function sameLoopbackServer(a: string, b: string): boolean {
   try {
-    const res = await fetch(`${baseUrl}/models`, { signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    const data = json?.data ?? json?.models ?? [];
-    return (Array.isArray(data) ? data : [])
-      .map((m: any) => m?.id ?? m?.name ?? m?.model)
-      .filter(Boolean);
-  } finally {
-    clearTimeout(t);
+    const ua = new URL(stripToOrigin(a));
+    const ub = new URL(stripToOrigin(b));
+    const host = (h: string) => (h === "localhost" ? "127.0.0.1" : h);
+    return host(ua.hostname) === host(ub.hostname) && ua.port === ub.port;
+  } catch {
+    return false;
   }
 }
 
 export async function registerRoutes(_httpServer: Server, app: Express): Promise<Server> {
+  // ---- Liveness (must stay cheap — Electron polls this to know the app is up) ----
+  app.get("/api/health", (_req, res) => {
+    res.json({ ok: true });
+  });
+
   // ---- Settings ----
   app.get("/api/settings", async (_req, res) => {
-    const all = await storage.getAllSettings();
-    res.json({
-      ollamaUrl: all.ollamaUrl ?? "http://localhost:1234",
-      model: all.model ?? "",
-    });
+    const saved = await loadModelSettings();
+    res.json(saved);
   });
 
   app.post("/api/settings", async (req, res) => {
-    const { ollamaUrl, model } = req.body ?? {};
-    if (typeof ollamaUrl === "string") await storage.setSetting("ollamaUrl", ollamaUrl);
+    const { ollamaUrl, model, apiKey } = req.body ?? {};
+    if (typeof ollamaUrl === "string") await storage.setSetting("ollamaUrl", stripToOrigin(ollamaUrl));
     if (typeof model === "string") await storage.setSetting("model", model);
+    if (typeof apiKey === "string") await storage.setSetting("apiKey", apiKey);
     res.json({ ok: true });
   });
 
   // ---- Status + models ----
   app.get("/api/status", async (req, res) => {
-    const raw = (req.query.url as string) || (await storage.getSetting("ollamaUrl")) || "http://localhost:1234";
-    const base = normalizeBase(raw);
-    try {
-      const models = await fetchModels(base);
-      res.json({ connected: true, baseUrl: base, models, demo: false });
-    } catch {
-      res.json({ connected: false, baseUrl: base, models: [], demo: true });
+    const discover = req.query.discover === "1" || req.query.discover === "true";
+    const raw = (req.query.url as string) || undefined;
+    const probe = await probeSavedServer({ url: raw, discover });
+    if (probe.connected && !raw) {
+      const saved = await loadModelSettings();
+      // Persist 127.0.0.1 when localhost was only failing because of IPv6,
+      // so later chat requests hit the address that actually worked.
+      if (saved.ollamaUrl !== probe.origin && sameLoopbackServer(saved.ollamaUrl, probe.origin)) {
+        await storage.setSetting("ollamaUrl", probe.origin);
+      }
     }
+    res.json(probe);
   });
 
   app.get("/api/models", async (_req, res) => {
-    const raw = (await storage.getSetting("ollamaUrl")) || "http://localhost:1234";
-    const base = normalizeBase(raw);
-    try {
-      const models = await fetchModels(base);
-      res.json({ models, connected: true });
-    } catch {
-      res.json({ models: [], connected: false });
-    }
+    const probe = await probeSavedServer();
+    res.json({ models: probe.models, connected: probe.connected, error: probe.error, hint: probe.hint });
   });
 
   // ---- Bookmarks ----
@@ -239,17 +252,14 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
         ? ((Math.floor(req.body.localHour) % 24) + 24) % 24
         : undefined;
 
-    const raw = (await storage.getSetting("ollamaUrl")) || "http://localhost:1234";
-    const base = normalizeBase(raw);
-    let chosenModel = model || (await storage.getSetting("model")) || "";
-    // LM Studio returns 400 Bad Request for an empty/invalid model — resolve one.
-    if (!chosenModel) {
-      try {
-        const found = await fetchModels(base);
-        chosenModel = found[0] || "local-model";
-      } catch {
-        chosenModel = "local-model";
-      }
+    const saved = await loadModelSettings();
+    const probe = await probeSavedServer({ timeoutMs: 4000 });
+    let chosenModel = (typeof model === "string" && model) || saved.model || "";
+    // LM Studio returns 400 for an empty/unknown model id — prefer one the
+    // server actually listed, including when an old default like llama3.2
+    // was saved before a real model was loaded.
+    if (!chosenModel || (probe.models.length > 0 && !probe.models.includes(chosenModel))) {
+      chosenModel = probe.models[0] || chosenModel;
     }
 
     res.setHeader("Content-Type", "text/event-stream");
@@ -268,28 +278,54 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
       .filter((m) => ["system", "user", "assistant"].includes(m?.role) && typeof m?.content === "string")
       .map((m) => ({ role: m.role, content: m.content }));
 
+    if (!probe.connected) {
+      const demo = buildDemoReply(history, probe);
+      for (const chunk of chunkText(demo)) {
+        send({ token: chunk, demo: true });
+        await sleep(18);
+      }
+      send({ done: true, demo: true });
+      return res.end();
+    }
+
+    if (!chosenModel) {
+      send({
+        error: "LM Studio is reachable but no model is loaded. Load a chat model, then try again.",
+        done: true,
+      });
+      return res.end();
+    }
+
     const payload = {
       model: chosenModel,
       stream: true,
       messages: [{ role: "system", content: buildCasperPrompt({ localHour, history: cleanHistory }) }, ...cleanHistory],
     };
 
-    let connected = false;
+    let streaming = false;
     const ctrl = new AbortController();
     const connectTimer = setTimeout(() => {
-      if (!connected) ctrl.abort();
-    }, 4000);
+      if (!streaming) ctrl.abort();
+    }, 90_000);
+    req.on("close", () => ctrl.abort());
     try {
-      const upstream = await fetch(`${base}/chat/completions`, {
+      const upstream = await fetch(`${probe.baseUrl}/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: modelHeaders(saved.apiKey),
         body: JSON.stringify(payload),
         signal: ctrl.signal,
       });
 
-      if (!upstream.ok || !upstream.body) throw new Error(`HTTP ${upstream.status}`);
+      if (!upstream.ok || !upstream.body) {
+        const detail = (await upstream.text().catch(() => "")).slice(0, 400);
+        send({
+          error: `LM Studio returned HTTP ${upstream.status}${detail ? `: ${detail}` : ""}. Check that "${chosenModel}" is loaded.`,
+          done: true,
+        });
+        return res.end();
+      }
 
-      connected = true;
+      streaming = true;
       clearTimeout(connectTimer);
       const reader = (upstream.body as any).getReader();
       const decoder = new TextDecoder();
@@ -313,6 +349,8 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
             const json = JSON.parse(data);
             const token = json?.choices?.[0]?.delta?.content ?? "";
             if (token) send({ token });
+            const errMsg = json?.error?.message || json?.error;
+            if (typeof errMsg === "string" && errMsg) send({ error: errMsg });
           } catch {
             // ignore malformed keep-alive frames
           }
@@ -320,11 +358,10 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
       }
       send({ done: true });
       return res.end();
-    } catch {
+    } catch (err) {
       clearTimeout(connectTimer);
-      // ---- Demo fallback ----
-      if (!connected) {
-        const demo = buildDemoReply(history, chosenModel, base);
+      if (!streaming) {
+        const demo = buildDemoReply(history, probe, err);
         for (const chunk of chunkText(demo)) {
           send({ token: chunk, demo: true });
           await sleep(18);
@@ -349,14 +386,23 @@ function chunkText(text: string): string[] {
   return text.match(/\S+\s*/g) ?? [text];
 }
 
-function buildDemoReply(history: any[], model: string, base: string): string {
+function buildDemoReply(
+  history: any[],
+  probe: { origin: string; error?: string; hint?: string },
+  err?: unknown,
+): string {
   const lastUser = [...history].reverse().find((m) => m.role === "user");
   const q = (lastUser?.content ?? "").toString().trim();
   const short = q.length > 160 ? q.slice(0, 157) + "…" : q;
+  const where = probe.origin;
+  const why = probe.error || (err instanceof Error ? err.message : "");
+  const how =
+    probe.hint ||
+    "Open LM Studio → Developer → start the local server (http://127.0.0.1:1234), load a chat model, then click the refresh icon on my panel.";
 
   if (!q) {
-    return `Boo! 👻 I'm Casper, your ghost-in-the-browser. I'm running in **demo mode** right now because I can't reach your local model server at ${base}. Once you start LM Studio's local server (or Ollama), I'll be fully alive — able to read context, reason, and stream real answers. What can I help you explore?`;
+    return `Boo! 👻 I'm Casper, your ghost-in-the-browser. I'm running in **demo mode** because I can't reach your local model server at ${where}${why ? ` (${why})` : ""}. ${how} Once I'm connected I'll be fully alive — able to read context, reason, and stream real answers.`;
   }
 
-  return `Ooh, you said: "${short}" 👻\n\nQuick heads-up: I'm in **demo mode**. I can't reach your local model server at ${base}, so this is a scripted reply, not a real generation. To bring me fully online, open LM Studio → the **Local Server** tab → **Start Server** (defaults to http://localhost:1234), load a model, then hit refresh in my panel. I can also talk to Ollama at http://localhost:11434.\n\nWhen I'm live, I'll actually answer "${short}" with real reasoning. Want me to walk you through getting LM Studio set up?`;
+  return `Ooh, you said: "${short}" 👻\n\nQuick heads-up: I'm in **demo mode**. I can't reach your local model server at ${where}${why ? ` — ${why}` : ""}, so this is a scripted reply, not a real generation.\n\n${how}\n\nWhen I'm live, I'll actually answer "${short}" with real reasoning.`;
 }

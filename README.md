@@ -43,7 +43,7 @@ Casper can chat about the page you are viewing, summarize it, explain it, and pu
 
 ## Quick Start
 
-1. In LM Studio, open the Local Server screen and start the server. The default address is `http://localhost:1234`.
+1. In LM Studio, open the **Developer** tab and start the local server. The default address is `http://127.0.0.1:1234`. Load a chat model.
 2. Install dependencies:
 
    ```bash
@@ -56,7 +56,9 @@ Casper can chat about the page you are viewing, summarize it, explain it, and pu
    npm run electron
    ```
 
-4. Open Casper, select Settings, test the LM Studio connection, choose the loaded model, and save.
+4. Open Casper. It should flip from **Demo** to **Live** once it can see LM Studio. If it stays in demo mode, open Settings, click **Test connection** (or **Find my server**), choose the loaded model, and save.
+
+   If LM Studio requires an API token, paste it in Settings. Prefer `http://127.0.0.1:1234` over `localhost` — Node can resolve `localhost` to IPv6 while LM Studio is listening on IPv4.
 
 For development with frontend hot reload:
 
@@ -87,7 +89,7 @@ The installers are unsigned by default. Windows SmartScreen and macOS Gatekeeper
 
 ## Local AI and Privacy
 
-Haunted Browser defaults to LM Studio at `http://localhost:1234`. Casper sends chat history and the explicitly captured active-page context only to the model endpoint configured in Settings.
+Haunted Browser defaults to LM Studio at `http://127.0.0.1:1234`. Casper sends chat history and the explicitly captured active-page context only to the model endpoint configured in Settings.
 
 Local data is stored in SQLite. Database files, environment files, dependencies, build output, and packaged installers are excluded from Git.
 

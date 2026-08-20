@@ -4,8 +4,11 @@ import type { Bookmark } from "@shared/schema";
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
-export async function fetchStatus(url?: string): Promise<CasperStatus> {
-  const qs = url ? `?url=${encodeURIComponent(url)}` : "";
+export async function fetchStatus(url?: string, opts?: { discover?: boolean }): Promise<CasperStatus> {
+  const params = new URLSearchParams();
+  if (url) params.set("url", url);
+  if (opts?.discover) params.set("discover", "1");
+  const qs = params.toString() ? `?${params.toString()}` : "";
   const res = await apiRequest("GET", `/api/status${qs}`);
   return res.json();
 }
@@ -37,12 +40,12 @@ export async function clearHistory() {
   await apiRequest("DELETE", "/api/history");
 }
 
-export async function fetchSettings() {
+export async function fetchSettings(): Promise<{ ollamaUrl: string; model: string; apiKey: string }> {
   const res = await apiRequest("GET", "/api/settings");
   return res.json();
 }
 
-export async function saveSettings(body: { ollamaUrl: string; model: string }) {
+export async function saveSettings(body: { ollamaUrl: string; model: string; apiKey?: string }) {
   await apiRequest("POST", "/api/settings", body);
 }
 

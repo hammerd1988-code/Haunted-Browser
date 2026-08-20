@@ -50,7 +50,7 @@ export function CasperPanel({
         ]
       : [
           { label: "What can you do", icon: Sparkles, prompt: "What can you help me with while browsing?", inject: false },
-          { label: "Connect model", icon: Wrench, prompt: "How do I connect you to my local Ollama or LM Studio so you're fully live?", inject: false },
+          { label: "Connect model", icon: Wrench, prompt: "How do I connect you to my local LM Studio so you leave demo mode and answer with a real model?", inject: false },
           { label: "About Casper", icon: BookOpen, prompt: "Tell me about yourself, Casper.", inject: false },
         ];
 
@@ -65,7 +65,7 @@ export function CasperPanel({
             <StatusBadge status={status} />
           </div>
           <p className="text-xs text-muted-foreground truncate">
-            {status.connected ? status.models.length ? `${status.models.length} models · ${shortModel(status)}` : "Connected" : "Demo mode — no model server"}
+            {status.connected ? status.models.length ? `${status.models.length} models · ${shortModel(status)}` : "Connected — load a model in LM Studio" : "Demo mode — start LM Studio's Developer server"}
           </p>
         </div>
         <button type="button" aria-label="Refresh connection" onClick={onRefreshStatus} className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors">
@@ -78,6 +78,19 @@ export function CasperPanel({
           <X className="w-4 h-4" />
         </button>
       </div>
+
+      {!status.connected && (
+        <div className="px-4 py-2 border-b border-border bg-amber-500/10 text-[11px] text-amber-200/90">
+          {status.hint || "Start LM Studio → Developer → local server on http://127.0.0.1:1234, load a chat model, then hit refresh."}
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="ml-1 underline underline-offset-2 hover:text-amber-100"
+          >
+            Open settings
+          </button>
+        </div>
+      )}
 
       {/* page-context indicator */}
       {pageContextAvailable && (
