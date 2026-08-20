@@ -17,13 +17,13 @@ jobs:
         include:
           - label: Windows x64
             os: windows-latest
-            command: npx electron-builder --win nsis --x64
+            command: npx electron-builder --win nsis --x64 --publish never
           - label: Linux x64
             os: ubuntu-latest
-            command: npx electron-builder --linux AppImage --x64
+            command: npx electron-builder --linux AppImage --x64 --publish never
           - label: macOS Intel and Apple Silicon
             os: macos-15
-            command: npx electron-builder --mac dmg --x64 --arm64
+            command: npx electron-builder --mac dmg --x64 --arm64 --publish never
 
     runs-on: ${{ matrix.os }}
 
