@@ -142,9 +142,11 @@ wine wineboot --init
 npm run dist:win
 ```
 
-No code-signing is performed (the build logs "signing is skipped"), which is fine for a
-local/personal prototype — Windows SmartScreen will warn on first launch. Sign with an
-Authenticode certificate for a clean experience.
+No code-signing is performed by default (the build logs "signing is skipped"), which is
+fine for a local or personal prototype. Windows SmartScreen and macOS Gatekeeper may warn
+on first launch. Follow [CODE_SIGNING.md](CODE_SIGNING.md) to configure Windows Authenticode
+signing, macOS Developer ID signing and notarization, GitHub Actions secrets, and artifact
+verification.
 
 Output lands in `release/` (e.g. `release/Haunted Browser Setup 1.0.0.exe`).
 The build bundles the React client + Express server into a single app, rebuilds
@@ -192,10 +194,9 @@ Notes:
 - The optional `bufferutil` dependency was removed (it's not needed; `ws` falls back to pure JS).
 - `electron-builder` and `electron-updater` are dev/production dependencies respectively —
   they won't be installed for end users who just run the built installer.
-- Auto-update checks use the public GitHub Releases feed. Signed installers are
-  recommended before distributing Haunted Browser beyond development testing.
-- For seamless Windows updates with no SmartScreen warnings, sign the installer with an
-  Authenticode certificate (optional for a personal/local prototype).
+- Auto-update checks use the public GitHub Releases feed. Signed and verified installers are
+  recommended before distributing Haunted Browser beyond development testing. Follow
+  [CODE_SIGNING.md](CODE_SIGNING.md) for both Windows and macOS.
 
 ## Troubleshooting
 

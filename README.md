@@ -83,7 +83,7 @@ npm run dist:mac
 
 Platform installers are written to `release/`. Cross-building the Windows NSIS installer on Linux requires both Wine packages that provide `wine64` and `wine`.
 
-The installers are unsigned by default. Windows SmartScreen may therefore show a warning until releases are signed with an Authenticode certificate.
+The installers are unsigned by default. Windows SmartScreen and macOS Gatekeeper may therefore show warnings. See [CODE_SIGNING.md](CODE_SIGNING.md) for Authenticode, Developer ID, notarization, GitHub Actions secrets, and release-verification instructions.
 
 ## Local AI and Privacy
 
@@ -98,6 +98,8 @@ The packaged app includes `electron-updater`. Before distributing releases, repl
 ## Documentation
 
 See [RUNBOOK.md](RUNBOOK.md) for detailed setup, packaging, update-channel, page-context, and troubleshooting instructions.
+
+See [CODE_SIGNING.md](CODE_SIGNING.md) for Windows and macOS code-signing setup.
 
 ## Status
 
