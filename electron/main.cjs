@@ -32,7 +32,7 @@ function debugLog(msg) {
 
 function isPortUp() {
   return new Promise((resolve) => {
-    const req = http.get(`${URL}/api/status`, (res) => {
+    const req = http.get(`${URL}/api/health`, (res) => {
       // Any HTTP response means the server process is listening —
       // a 503 just means the model server is down, not that the app is down.
       resolve(true);

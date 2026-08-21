@@ -26,7 +26,7 @@ if models_json=$(curl -sf --max-time 3 "$LM/v1/models" 2>/dev/null); then
   fi
 else
   echo -e "  \033[33m[!] LM Studio not reachable at $LM\033[0m"
-  echo -e "      \033[33mStart it: LM Studio -> Local Server tab -> Start Server -> load a model.\033[0m"
+  echo -e "      \033[33mStart it: LM Studio -> Developer tab -> Start server -> load a model.\033[0m"
   echo -e "      \033[90m(Casper will run in demo mode until then.)\033[0m"
 fi
 

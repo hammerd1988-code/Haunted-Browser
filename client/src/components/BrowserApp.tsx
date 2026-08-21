@@ -56,7 +56,7 @@ export function BrowserApp() {
   const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
   const currentUrl = activeTab.url;
   const isBookmarked = bookmarks.some((b) => b.url === currentUrl);
-  const model = settingsQuery.data?.model || status.models[0] || "llama3.2";
+  const model = settingsQuery.data?.model || status.models[0] || "";
 
   // Backstop clear: whenever the active tab or its URL changes (including to
   // New Tab, where the webview is unmounted and no navigation clear fires),
@@ -66,18 +66,38 @@ export function BrowserApp() {
     setHasPageContext(false);
   }, [activeId, currentUrl]);
 
-  const refreshStatus = useCallback(async (url?: string) => {
+  const refreshStatus = useCallback(async (url?: string, opts?: { discover?: boolean }) => {
     try {
-      const s = await fetchStatus(url);
+      const s = await fetchStatus(url, opts);
       setStatus(s);
+      return s;
     } catch {
-      setStatus({ connected: false, baseUrl: "", models: [], demo: true });
+      const fallback: CasperStatus = { connected: false, baseUrl: "", models: [], demo: true };
+      setStatus(fallback);
+      return fallback;
     }
   }, []);
 
   useEffect(() => {
     refreshStatus();
-  }, [refreshStatus, settingsQuery.data?.ollamaUrl]);
+  }, [refreshStatus, settingsQuery.data?.ollamaUrl, settingsQuery.data?.apiKey]);
+
+  // Flip out of demo mode automatically once LM Studio comes online.
+  useEffect(() => {
+    if (status.connected) return;
+    const timer = window.setInterval(() => {
+      refreshStatus();
+    }, 8000);
+    return () => window.clearInterval(timer);
+  }, [status.connected, refreshStatus]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      refreshStatus();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshStatus]);
 
   // ---- tab ops ----
   const navigate = useCallback(
@@ -380,17 +400,20 @@ export function BrowserApp() {
   const openBookmark = useCallback((url: string) => navigate(url), [navigate]);
 
   const handleSaveSettings = useCallback(
-    async (ollamaUrl: string, mdl: string) => {
-      await saveSettings({ ollamaUrl, model: mdl });
+    async (ollamaUrl: string, mdl: string, apiKey: string) => {
+      await saveSettings({ ollamaUrl, model: mdl, apiKey });
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       await refreshStatus(ollamaUrl);
     },
     [queryClient, refreshStatus],
   );
 
-  const testConnection = useCallback(async (url: string) => {
-    await refreshStatus(url);
-  }, [refreshStatus]);
+  const testConnection = useCallback(
+    async (url: string, opts?: { discover?: boolean }) => {
+      return refreshStatus(url, opts);
+    },
+    [refreshStatus],
+  );
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden text-foreground">
@@ -475,8 +498,9 @@ export function BrowserApp() {
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         status={status}
-        ollamaUrl={settingsQuery.data?.ollamaUrl ?? "http://localhost:1234"}
+        ollamaUrl={settingsQuery.data?.ollamaUrl ?? "http://127.0.0.1:1234"}
         model={model}
+        apiKey={settingsQuery.data?.apiKey ?? ""}
         onSave={handleSaveSettings}
         onTest={testConnection}
       />

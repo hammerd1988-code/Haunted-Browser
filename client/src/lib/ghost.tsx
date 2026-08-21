@@ -137,8 +137,11 @@ export interface ChatMessage {
 export interface CasperStatus {
   connected: boolean;
   baseUrl: string;
+  origin?: string;
   models: string[];
   demo: boolean;
+  error?: string;
+  hint?: string;
 }
 
 /* ------------------------------------------------------------------ */

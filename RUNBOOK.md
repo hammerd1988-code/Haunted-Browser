@@ -6,10 +6,11 @@ Run Haunted Browser on your own machine, powered by your local **LM Studio** mod
 
 1. **Node.js 20+** — <https://nodejs.org> (verify: `node -v`)
 2. **LM Studio** — <https://lmstudio.ai>
-   - Open LM Studio → **Local Server** tab
-   - Click **Start Server** (defaults to port **1234**)
-   - Load a chat model (e.g. Llama 3.2, Qwen, Mistral) — any GGUF model from the catalog works
-   - Confirm the server page shows the model as loaded
+   - Open LM Studio → **Developer** tab
+   - Start the local server (defaults to port **1234**)
+   - Load a chat model (e.g. Llama, Qwen, Mistral, Granite) — any GGUF model from the catalog works
+   - Confirm `curl http://127.0.0.1:1234/v1/models` lists the model
+   - If you enabled an API token in server settings, copy it for Casper Settings
 
 ## Run it
 
@@ -24,9 +25,10 @@ Then open <http://localhost:5000> in any browser.
 
 1. Click the **Casper** pill (top-right) to open the assistant panel.
 2. Click the gear icon → **Settings**.
-3. Model server URL should already be `http://localhost:1234` (LM Studio default).
-4. Click **Test connection** — it should flip to **Live** and list your loaded model.
+3. Model server URL should already be `http://127.0.0.1:1234` (LM Studio default).
+4. Click **Test connection** — it should flip to **Live** and list your loaded model. Use **Find my server** if the port or host is wrong (it also checks Ollama on 11434).
 5. Pick a model from the dropdown, then **Save & haunt**.
+6. If LM Studio is set to require authentication, paste the API token into Settings.
 
 Casper now streams real answers from your local model. No data leaves your machine.
 
@@ -45,8 +47,8 @@ Casper now streams real answers from your local model. No data leaves your machi
 
 ## Ollama alternative
 
-If you use Ollama instead: `ollama serve` (default `http://localhost:11434`),
-then set the model server URL to `http://localhost:11434` in Settings.
+If you use Ollama instead: `ollama serve` (default `http://127.0.0.1:11434`),
+then set the model server URL to `http://127.0.0.1:11434` in Settings, or click **Find my server**.
 
 ## Electron desktop build (real browsing of any site)
 
@@ -200,10 +202,11 @@ Notes:
 
 ## Troubleshooting
 
-- **"Not reachable — running in demo mode"**: LM Studio's server isn't started, no model is loaded,
-  or the port differs. Re-check the Local Server tab.
-- **"Bad Request"**: a model wasn't selected. Pick one from the dropdown (Casper auto-resolves the
-  loaded model, but a firewall or wrong port can prevent the model list from loading).
+- **"Not reachable — running in demo mode"**: LM Studio's Developer server isn't started, no model is loaded,
+  the port differs, or `localhost` is resolving to IPv6. Use `http://127.0.0.1:1234`, click **Find my server**,
+  and confirm `curl http://127.0.0.1:1234/v1/models` works. If LM Studio requires a token, paste it in Settings.
+- **"Bad Request" / HTTP 400**: the selected model id isn't loaded. Pick the model LM Studio lists, or load one.
+- **"API token" / HTTP 401**: Developer → server settings has authentication on. Copy the token into Casper Settings.
 - **Port 5000 in use**: another process holds 5000. Stop it, or it'll auto-retry the next port.
 - **`better-sqlite3` build error on Windows**: ensure Node 20+ and run `npm install` again;
   prebuilt binaries are fetched automatically — no compiler needed.

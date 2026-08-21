@@ -31,7 +31,7 @@ try {
     }
 } catch {
     Write-Host "  [!] LM Studio not reachable at $lm" -ForegroundColor Yellow
-    Write-Host "      Start it: LM Studio -> Local Server tab -> Start Server -> load a model." -ForegroundColor Yellow
+    Write-Host "      Start it: LM Studio -> Developer tab -> Start server -> load a model." -ForegroundColor Yellow
     Write-Host "      (Casper will run in demo mode until then.)" -ForegroundColor DarkGray
 }
 
