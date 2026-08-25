@@ -107,6 +107,12 @@ See [CODE_SIGNING.md](CODE_SIGNING.md) for Windows and macOS code-signing setup.
 
 Haunted Browser is an active prototype. The browser feature smoke test covers tab creation and closing, address-bar focus, navigation, live tab titles, find-in-page results, per-tab zoom, and shortcuts while a web page has focus.
 
+## Blood Sweat Code
+
+Haunted Browser is the agentic Casper browser meant to replace BSC-V3's old
+Ghost Browser co-browse panel. A ready-to-apply patch lives in
+[integrations/bsc-v3](integrations/bsc-v3).
+
 ## License
 
 Licensed under the [MIT License](LICENSE).
