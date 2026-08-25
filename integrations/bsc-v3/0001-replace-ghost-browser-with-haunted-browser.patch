@@ -1,18 +1,21 @@
-From 3eb2032eb854c2bd2e838643ef4418bfbf3f43b9 Mon Sep 17 00:00:00 2001
+From d3ebf925b789642d81077b5a997ebf653db7d05e Mon Sep 17 00:00:00 2001
 From: Cursor Agent <cursoragent@cursor.com>
-Date: Tue, 25 Aug 2026 06:18:29 +0000
+Date: Tue, 25 Aug 2026 13:02:19 +0000
 Subject: [PATCH] Replace Ghost Browser with Haunted Browser for Casper.
 
 Swap the screenshot-stream co-browse panel for Haunted Browser chrome:
 real tabs, address bar, bookmarks, and a Casper sidebar wired to the
 existing command loop. Desktop Electron now hosts native Chromium
 webview tabs; the web app uses iframes with an SSRF-guarded embed probe.
+
+Page-aware Casper actions require an explicit page-reading opt-in.
+In-panel chat stays on /api/casper/command rather than the Casper CLI IPC sidecar.
 ---
  casperCoBrowse.ts                             |   7 +-
  casperControlCenter.ts                        |  20 +
  casperEmbedProbe.test.ts                      |  63 ++
  casperEmbedProbe.ts                           |  86 ++
- packages/desktop/README.md                    |   5 +-
+ packages/desktop/README.md                    |  23 +-
  packages/desktop/electron/ipc.ts              |   1 +
  packages/desktop/electron/main.ts             |  51 +-
  packages/desktop/electron/preload.ts          |  13 +
@@ -20,20 +23,25 @@ webview tabs; the web app uses iframes with an SSRF-guarded embed probe.
  src/components/CasperCoBrowse.tsx             | 840 +-----------------
  src/components/haunted/BookmarksBar.tsx       |  46 +
  src/components/haunted/BrowserViewport.tsx    | 137 +++
- src/components/haunted/CasperPanel.tsx        | 233 +++++
+ src/components/haunted/CasperPanel.tsx        | 263 ++++++
  src/components/haunted/ElectronViewport.tsx   | 294 ++++++
- .../haunted/HauntedBrowser.test.tsx           |  94 ++
- src/components/haunted/HauntedBrowser.tsx     | 442 +++++++++
+ .../haunted/HauntedBrowser.test.tsx           | 216 +++++
+ src/components/haunted/HauntedBrowser.tsx     | 497 +++++++++++
  src/components/haunted/NewTabPage.tsx         | 105 +++
+ src/components/haunted/PageReadingConsent.tsx |  55 ++
  src/components/haunted/TabBar.tsx             |  87 ++
  src/components/haunted/Toolbar.tsx            | 146 +++
  src/components/haunted/bookmarks.ts           |  38 +
  src/components/haunted/ghost.tsx              | 150 ++++
  src/components/haunted/haunted.css            |  87 ++
+ src/components/haunted/pageContext.test.ts    | 124 +++
+ src/components/haunted/pageContext.ts         |  65 ++
+ src/components/haunted/pageReading.test.ts    |  24 +
+ src/components/haunted/pageReading.ts         |  26 +
  src/components/haunted/webview.d.ts           |  17 +
- src/lib/desktop.ts                            |  14 +-
+ src/lib/desktop.ts                            |  16 +-
  src/lib/subscription.tsx                      |   6 +-
- 25 files changed, 2143 insertions(+), 845 deletions(-)
+ 30 files changed, 2664 insertions(+), 845 deletions(-)
  create mode 100644 casperEmbedProbe.test.ts
  create mode 100644 casperEmbedProbe.ts
  create mode 100644 src/components/haunted/BookmarksBar.tsx
@@ -43,11 +51,16 @@ webview tabs; the web app uses iframes with an SSRF-guarded embed probe.
  create mode 100644 src/components/haunted/HauntedBrowser.test.tsx
  create mode 100644 src/components/haunted/HauntedBrowser.tsx
  create mode 100644 src/components/haunted/NewTabPage.tsx
+ create mode 100644 src/components/haunted/PageReadingConsent.tsx
  create mode 100644 src/components/haunted/TabBar.tsx
  create mode 100644 src/components/haunted/Toolbar.tsx
  create mode 100644 src/components/haunted/bookmarks.ts
  create mode 100644 src/components/haunted/ghost.tsx
  create mode 100644 src/components/haunted/haunted.css
+ create mode 100644 src/components/haunted/pageContext.test.ts
+ create mode 100644 src/components/haunted/pageContext.ts
+ create mode 100644 src/components/haunted/pageReading.test.ts
+ create mode 100644 src/components/haunted/pageReading.ts
  create mode 100644 src/components/haunted/webview.d.ts
 
 diff --git a/casperCoBrowse.ts b/casperCoBrowse.ts
@@ -272,20 +285,23 @@ index 0000000..129e74f
 +  }
 +}
 diff --git a/packages/desktop/README.md b/packages/desktop/README.md
-index 4cae47d..92d5ed4 100644
+index 4cae47d..a9d3f83 100644
 --- a/packages/desktop/README.md
 +++ b/packages/desktop/README.md
-@@ -9,6 +9,9 @@ native capabilities a browser PWA can't provide:
+@@ -9,6 +9,12 @@ native capabilities a browser PWA can't provide:
    process proxies the requests instead.
  - **Embedded Casper CLI** — ships the [`@bsc/casper-cli`](../casper-cli) binary as a
    sidecar so the UI can run real shell-backed operations (build, push, scrape, git).
++  This is `bridge.casper.run()` / `bsc:casper:run`. It is **not** how the Haunted
++  Browser Casper panel talks to Casper.
 +- **Haunted Browser** — Casper's in-app browser uses real Chromium `<webview>`
 +  tabs (no iframe X-Frame-Options limits). Chrome shortcuts typed while a page
-+  has focus are forwarded to the renderer.
++  has focus are forwarded to the renderer via `bsc:browser:shortcut`. In-panel
++  chat is still HTTP: `sendCasperCommand` → `/api/casper/command`.
  - **Auto-updates** — via `electron-updater` against GitHub Releases.
  - **Standalone window** — no browser chrome, single-instance, off-origin links open
    in the user's real browser.
-@@ -18,7 +21,7 @@ native capabilities a browser PWA can't provide:
+@@ -18,7 +24,7 @@ native capabilities a browser PWA can't provide:
  ```
  packages/desktop/
    electron/
@@ -294,6 +310,28 @@ index 4cae47d..92d5ed4 100644
      preload.ts       # contextBridge → window.bscDesktop (typed, sandboxed)
      ipc.ts           # shared IPC channel names
      localLlm.ts      # LM Studio / Ollama probe + chat proxy (OpenAI-compatible)
+@@ -44,6 +50,21 @@ if (isDesktopApp()) {
+ In a normal browser these helpers are inert (`isDesktopApp()` is `false`), so the
+ same code falls back to cloud models and the relay-based Casper flow.
+ 
++### What Haunted Browser actually uses
++
++```
++focused <webview> key
++  → Electron main `before-input-event`
++  → IPC `bsc:browser:shortcut`
++  → preload `browser.onShortcut`
++  → HauntedBrowser.dispatchShortcut
++```
++
++The Casper side panel does **not** call `getDesktopBridge().casper.run()`. It builds
++a command (optionally with a user-consented page excerpt) and posts it to BSC's
++existing `/api/casper/command` on the `control_center` surface so identity, tools,
++memory, missions, entitlements, and provider routing stay in the BSC backend.
++
+ ## Develop
+ 
+ ```bash
 diff --git a/packages/desktop/electron/ipc.ts b/packages/desktop/electron/ipc.ts
 index 3a95d4c..7086838 100644
 --- a/packages/desktop/electron/ipc.ts
@@ -1477,10 +1515,10 @@ index 0000000..faa3034
 +}
 diff --git a/src/components/haunted/CasperPanel.tsx b/src/components/haunted/CasperPanel.tsx
 new file mode 100644
-index 0000000..c36753f
+index 0000000..8a119d8
 --- /dev/null
 +++ b/src/components/haunted/CasperPanel.tsx
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,263 @@
 +import { useEffect, useRef, useState, type ReactNode } from 'react';
 +import { Send, X, Info, Sparkles, BookOpen, LifeBuoy, ListChecks, FileText } from 'lucide-react';
 +import type { ChatMessage } from './ghost';
@@ -1493,6 +1531,9 @@ index 0000000..c36753f
 +  onSend,
 +  currentUrl,
 +  pageContextAvailable,
++  pageReadingAllowed,
++  pageReadingCapable,
++  onTogglePageReading,
 +  onClose,
 +  onOpenAbout,
 +}: {
@@ -1501,6 +1542,9 @@ index 0000000..c36753f
 +  onSend: (text: string, opts?: { injectPage?: boolean }) => void;
 +  currentUrl: string;
 +  pageContextAvailable: boolean;
++  pageReadingAllowed: boolean;
++  pageReadingCapable: boolean;
++  onTogglePageReading: () => void;
 +  onClose: () => void;
 +  onOpenAbout: () => void;
 +}) {
@@ -1555,6 +1599,22 @@ index 0000000..c36753f
 +          </div>
 +          <p className="truncate text-xs text-[var(--hb-muted)]">Ghost in the machine · watching this tab</p>
 +        </div>
++        {pageReadingCapable && (
++          <button
++            type="button"
++            data-testid="haunted-share-page"
++            aria-pressed={pageReadingAllowed}
++            onClick={onTogglePageReading}
++            className={cn(
++              'shrink-0 rounded-full px-2 py-1 text-[10px] font-medium',
++              pageReadingAllowed
++                ? 'bg-[color-mix(in_srgb,var(--hb-primary)_18%,transparent)] text-[var(--hb-primary)]'
++                : 'bg-[var(--hb-accent)] text-[var(--hb-muted)] hover:text-[var(--hb-fg)]',
++            )}
++          >
++            {pageReadingAllowed ? 'Sharing page' : 'Share page'}
++          </button>
++        )}
 +        <button type="button" aria-label="About Haunted Browser" onClick={onOpenAbout} className="rounded-md p-1.5 text-[var(--hb-muted)] transition-colors hover:bg-[var(--hb-accent)] hover:text-[var(--hb-fg)]">
 +          <Info className="h-4 w-4" />
 +        </button>
@@ -1563,11 +1623,19 @@ index 0000000..c36753f
 +        </button>
 +      </div>
 +
-+      {pageContextAvailable && (
-+        <div className="flex items-center gap-1.5 px-4 pt-2 text-[11px] text-[color-mix(in_srgb,var(--hb-primary)_80%,transparent)]">
++      {(pageReadingCapable || pageContextAvailable) && (
++        <div
++          className="flex items-center gap-1.5 px-4 pt-2 text-[11px] text-[color-mix(in_srgb,var(--hb-primary)_80%,transparent)]"
++          data-testid="haunted-page-status"
++        >
 +          <FileText className="h-3 w-3" />
-+          Reading {host ?? 'this page'}
-+          <span className="text-[var(--hb-muted)]">· context ready</span>
++          {pageReadingAllowed
++            ? pageContextAvailable
++              ? `Will send page text · ${host ?? 'this page'}`
++              : 'Page reading on · waiting for page text'
++            : pageContextAvailable
++              ? 'Page ready · sharing off (URL only)'
++              : 'URL context only · page sharing off'}
 +        </div>
 +      )}
 +
@@ -2016,16 +2084,19 @@ index 0000000..f3632d5
 +}
 diff --git a/src/components/haunted/HauntedBrowser.test.tsx b/src/components/haunted/HauntedBrowser.test.tsx
 new file mode 100644
-index 0000000..18883be
+index 0000000..54c2a43
 --- /dev/null
 +++ b/src/components/haunted/HauntedBrowser.test.tsx
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,216 @@
 +import { describe, expect, it, vi, beforeEach } from 'vitest';
-+import { render, screen } from '@testing-library/react';
++import { act, render, screen, waitFor } from '@testing-library/react';
 +import userEvent from '@testing-library/user-event';
 +import { HauntedBrowser } from './HauntedBrowser';
 +import { isLikelyUrl, normalizeUrl, resolveAddress, hostOf, clampZoom, NEWTAB } from './ghost';
 +import { loadBookmarks, saveBookmarks } from './bookmarks';
++import { sendCasperCommand } from '../../lib/casper';
++import { PAGE_SELECTION_CAP, PAGE_TEXT_CAP } from './pageContext';
++import { getDesktopBridge, isHauntedWebview } from '../../lib/desktop';
 +
 +vi.mock('../../lib/casper', () => ({
 +  sendCasperCommand: vi.fn(async () => ({
@@ -2047,9 +2118,48 @@ index 0000000..18883be
 +
 +vi.mock('../../lib/desktop', () => ({
 +  isDesktopApp: () => false,
-+  isHauntedWebview: () => false,
-+  getDesktopBridge: () => null,
++  isHauntedWebview: vi.fn(() => false),
++  getDesktopBridge: vi.fn(() => null),
 +}));
++
++vi.mock('./ElectronViewport', async () => {
++  const React = await import('react');
++  const { NEWTAB: NEW_TAB } = await import('./ghost');
++  return {
++    ElectronViewport: ({
++      url,
++      onContext,
++    }: {
++      url: string;
++      onContext?: (ctx: { url: string; title: string; text: string; selection: string }) => void;
++    }) => {
++      React.useEffect(() => {
++        if (url === NEW_TAB || !onContext) return;
++        const timer = window.setTimeout(() => {
++          onContext({
++            url,
++            title: 'Example Domain',
++            text: 'X'.repeat(13_000),
++            selection: 'Y'.repeat(2_000),
++          });
++        }, 0);
++        return () => window.clearTimeout(timer);
++      }, [url, onContext]);
++      return React.createElement('div', { 'data-testid': 'haunted-electron-viewport' });
++    },
++  };
++});
++
++function renderBrowser() {
++  return render(
++    <HauntedBrowser
++      userId="user-1"
++      onClose={() => {}}
++      isExpanded={false}
++      onToggleExpand={() => {}}
++    />,
++  );
++}
 +
 +describe('haunted address helpers', () => {
 +  it('treats hostnames as URLs and everything else as search', () => {
@@ -2079,16 +2189,16 @@ index 0000000..18883be
 +});
 +
 +describe('HauntedBrowser', () => {
++  beforeEach(() => {
++    window.localStorage.clear();
++    vi.mocked(sendCasperCommand).mockClear();
++    vi.mocked(isHauntedWebview).mockReturnValue(false);
++    vi.mocked(getDesktopBridge).mockReturnValue(null);
++  });
++
 +  it('renders Casper chrome and opens a new tab', async () => {
 +    const user = userEvent.setup();
-+    render(
-+      <HauntedBrowser
-+        userId="user-1"
-+        onClose={() => {}}
-+        isExpanded={false}
-+        onToggleExpand={() => {}}
-+      />,
-+    );
++    renderBrowser();
 +
 +    expect(screen.getByTestId('haunted-browser')).toBeInTheDocument();
 +    expect(screen.getAllByText('Haunted Browser').length).toBeGreaterThan(0);
@@ -2101,25 +2211,105 @@ index 0000000..18883be
 +
 +  it('hides the Casper panel when toggled', async () => {
 +    const user = userEvent.setup();
-+    render(
-+      <HauntedBrowser
-+        userId="user-1"
-+        onClose={() => {}}
-+        isExpanded={false}
-+        onToggleExpand={() => {}}
-+      />,
-+    );
++    renderBrowser();
 +
 +    await user.click(screen.getByTestId('haunted-toggle-casper'));
 +    expect(screen.queryByTestId('haunted-casper-input')).not.toBeInTheDocument();
 +  });
++
++  it('subscribes to desktop shortcut IPC and unsubscribes on unmount', async () => {
++    const unsub = vi.fn();
++    let listener: ((event: { action: string }) => void) | undefined;
++    vi.mocked(getDesktopBridge).mockReturnValue({
++      isDesktop: true,
++      getVersion: async () => 'test',
++      localLlm: {
++        detect: async () => [],
++        probe: async () => ({ provider: 'lmstudio', baseUrl: '', online: false, models: [] }),
++        chat: async () => ({}),
++      },
++      casper: {
++        run: async () => ({ code: 0, stdout: '', stderr: '', timedOut: false }),
++        version: async () => 'test',
++      },
++      onUpdateStatus: () => () => {},
++      browser: {
++        webview: true,
++        onShortcut: (cb) => {
++          listener = cb;
++          return unsub;
++        },
++      },
++    });
++
++    const { unmount } = renderBrowser();
++    expect(listener).toBeTypeOf('function');
++    act(() => {
++      listener!({ action: 'new-tab' });
++    });
++    expect(screen.getAllByRole('tab')).toHaveLength(2);
++
++    const callsBeforeUnmount = unsub.mock.calls.length;
++    unmount();
++    expect(unsub.mock.calls.length).toBeGreaterThan(callsBeforeUnmount);
++  });
++
++  it('asks for consent then sends a capped page excerpt on summarize', async () => {
++    const user = userEvent.setup();
++    vi.mocked(isHauntedWebview).mockReturnValue(true);
++    renderBrowser();
++
++    const address = screen.getByTestId('haunted-address');
++    await user.clear(address);
++    await user.type(address, 'example.com{Enter}');
++
++    const summarize = await screen.findByRole('button', { name: /summarize page/i });
++    await user.click(summarize);
++
++    expect(screen.getByTestId('haunted-page-consent')).toBeInTheDocument();
++    expect(sendCasperCommand).not.toHaveBeenCalled();
++    expect(screen.getByTestId('haunted-page-status')).toHaveTextContent(/sharing off/i);
++
++    await user.click(screen.getByTestId('haunted-page-consent-allow'));
++
++    await waitFor(() => expect(sendCasperCommand).toHaveBeenCalledTimes(1));
++    const payload = vi.mocked(sendCasperCommand).mock.calls[0][0];
++    expect(payload.command).toContain('Page text:');
++    expect(payload.command).toContain('X'.repeat(PAGE_TEXT_CAP));
++    expect(payload.command).not.toContain('X'.repeat(PAGE_TEXT_CAP + 1));
++    expect(payload.command).toContain('Y'.repeat(PAGE_SELECTION_CAP));
++    expect(payload.command).not.toContain('Y'.repeat(PAGE_SELECTION_CAP + 1));
++    expect(payload.metadata).toMatchObject({ client: 'haunted-browser', pageTextIncluded: true });
++    expect(screen.getByTestId('haunted-page-status')).toHaveTextContent(/will send page text/i);
++  });
++
++  it('keeps URL-only Casper commands when page reading is declined', async () => {
++    const user = userEvent.setup();
++    vi.mocked(isHauntedWebview).mockReturnValue(true);
++    renderBrowser();
++
++    const address = screen.getByTestId('haunted-address');
++    await user.clear(address);
++    await user.type(address, 'example.com{Enter}');
++
++    await user.click(await screen.findByRole('button', { name: /summarize page/i }));
++    await user.click(screen.getByTestId('haunted-page-consent-deny'));
++
++    await waitFor(() => expect(sendCasperCommand).toHaveBeenCalledTimes(1));
++    const payload = vi.mocked(sendCasperCommand).mock.calls[0][0];
++    expect(payload.command).not.toContain('Page text:');
++    expect(payload.command).not.toContain('X'.repeat(20));
++    expect(payload.command).toContain('page reading is off');
++    expect(payload.metadata).toMatchObject({ pageTextIncluded: false });
++    expect(screen.getByTestId('haunted-page-status')).toHaveTextContent(/sharing off/i);
++  });
 +});
 diff --git a/src/components/haunted/HauntedBrowser.tsx b/src/components/haunted/HauntedBrowser.tsx
 new file mode 100644
-index 0000000..830bff8
+index 0000000..ede59a0
 --- /dev/null
 +++ b/src/components/haunted/HauntedBrowser.tsx
-@@ -0,0 +1,442 @@
+@@ -0,0 +1,497 @@
 +/**
 + * Haunted Browser — Casper's agentic in-app browser for Blood Sweat Code.
 + *
@@ -2141,13 +2331,15 @@ index 0000000..830bff8
 +  clampZoom,
 +  hostOf,
 +  resolveAddress,
-+  samePageUrl,
 +  uid,
 +  type ChatMessage,
 +  type PageContext,
 +  type Tab,
 +} from './ghost';
 +import { loadBookmarks, saveBookmarks, type HauntedBookmark } from './bookmarks';
++import { buildHauntedCasperCommand, isFreshPageContext, wantsPageInjection } from './pageContext';
++import { loadPageReading, savePageReading, type PageReadingPref } from './pageReading';
++import { PageReadingConsent } from './PageReadingConsent';
 +import { sendCasperCommand } from '../../lib/casper';
 +import { getDesktopBridge, isHauntedWebview } from '../../lib/desktop';
 +import { cn } from '../../lib/utils';
@@ -2181,6 +2373,9 @@ index 0000000..830bff8
 +  const [hasPageContext, setHasPageContext] = useState(false);
 +  const pageContextRef = useRef<PageContext | null>(null);
 +  const native = isHauntedWebview();
++  const [pageReading, setPageReading] = useState<PageReadingPref>(() => loadPageReading(userId));
++  const [consentOpen, setConsentOpen] = useState(false);
++  const pendingSendRef = useRef<{ text: string; injectPage?: boolean } | null>(null);
 +
 +  const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
 +  const currentUrl = activeTab.url;
@@ -2361,29 +2556,32 @@ index 0000000..830bff8
 +  }, [dispatchShortcut, findOpen]);
 +
 +  const sendToCasper = useCallback(
-+    async (text: string, opts: { injectPage?: boolean } = {}) => {
++    async (
++      text: string,
++      opts: { injectPage?: boolean } = {},
++      override?: { pageReading?: PageReadingPref },
++    ) => {
 +      if (streaming) return;
++      const readingPref = override?.pageReading ?? pageReading;
++      const wants = wantsPageInjection(text, opts.injectPage);
++      const fresh = isFreshPageContext(pageContextRef.current, currentUrl);
++      if (wants && fresh && readingPref === 'unset') {
++        pendingSendRef.current = { text, injectPage: opts.injectPage };
++        setConsentOpen(true);
++        setCasperOpen(true);
++        return;
++      }
++
 +      const userMsg: ChatMessage = { id: uid(), role: 'user', content: text };
 +      const asstId = uid();
-+      const ctx = pageContextRef.current;
-+      const pageKeywords = /(summar|explain|this page|current page|fix site|fix this|about this|describe|key points|extract|tldr)/i;
-+      const shouldInject = opts.injectPage || pageKeywords.test(text);
-+      const ctxFresh = !!(ctx?.text && ctx.text.trim() && samePageUrl(ctx.url, currentUrl));
-+
-+      const browseLine = currentUrl === NEWTAB
-+        ? '[Haunted Browser idle — new tab]'
-+        : `[Haunted Browser viewing ${currentUrl}${activeTab.title ? ` — "${activeTab.title}"` : ''}]`;
-+
-+      let command = `${browseLine}\n\nUser says: ${text}`;
-+      if (ctxFresh && shouldInject) {
-+        const snippet = ctx!.text!.slice(0, 12000);
-+        const selection = ctx!.selection?.trim()
-+          ? `\n\nThe user has selected this text on the page — focus on it if relevant:\n"${ctx!.selection!.slice(0, 1500)}"`
-+          : '';
-+        command = `${browseLine}${selection}\n\nPage text:\n${snippet}\n\nUser says: ${text}\n\n(Answer using the provided page text excerpt when relevant.)`;
-+      } else if (opts.injectPage && !ctxFresh && currentUrl !== NEWTAB) {
-+        command = `${browseLine}\n\nUser says: ${text}\n\n(Note: live page text is only readable in the Blood Sweat Code desktop app. I can still talk about this URL.)`;
-+      }
++      const built = buildHauntedCasperCommand({
++        userText: text,
++        currentUrl,
++        tabTitle: activeTab.title,
++        ctx: pageContextRef.current,
++        injectPage: opts.injectPage,
++        pageReadingAllowed: readingPref === 'allow',
++      });
 +
 +      setMessages((prev) => [...prev, userMsg, { id: asstId, role: 'assistant', content: '', pending: true }]);
 +      setStreaming(true);
@@ -2392,15 +2590,22 @@ index 0000000..830bff8
 +          .filter((m) => m.role !== 'system' && m.content.trim() && !m.pending)
 +          .map((m) => ({ role: m.role === 'user' ? 'user' as const : 'casper' as const, text: m.content }));
 +        const result = await sendCasperCommand({
-+          command,
++          command: built.command,
 +          conversationHistory,
 +          surface: 'control_center',
 +          pageContext: {
 +            path: '/casper',
 +            feature: 'Haunted Browser',
-+            description: 'agentic Casper browser with live page context',
++            description: built.includedPageText
++              ? `agentic Casper browser; page excerpt included (${built.includedChars} chars)`
++              : 'agentic Casper browser; URL context only',
 +          },
-+          metadata: { client: 'haunted-browser', url: currentUrl, native },
++          metadata: {
++            client: 'haunted-browser',
++            url: currentUrl,
++            native,
++            pageTextIncluded: built.includedPageText,
++          },
 +        });
 +        const casperText = result.response || 'No response.';
 +        setMessages((prev) => prev.map((m) => (m.id === asstId ? { ...m, content: casperText, pending: false } : m)));
@@ -2411,7 +2616,29 @@ index 0000000..830bff8
 +        setStreaming(false);
 +      }
 +    },
-+    [messages, streaming, currentUrl, activeTab.title, native],
++    [messages, streaming, currentUrl, activeTab.title, native, pageReading],
++  );
++
++  const resolveConsent = useCallback(
++    (pref: Exclude<PageReadingPref, 'unset'>) => {
++      savePageReading(userId, pref);
++      setPageReading(pref);
++      setConsentOpen(false);
++      const pending = pendingSendRef.current;
++      pendingSendRef.current = null;
++      if (pending) {
++        void sendToCasper(pending.text, { injectPage: pending.injectPage }, { pageReading: pref });
++      }
++    },
++    [userId, sendToCasper],
++  );
++
++  const setPageReadingPref = useCallback(
++    (pref: PageReadingPref) => {
++      savePageReading(userId, pref);
++      setPageReading(pref);
++    },
++    [userId],
 +  );
 +
 +  const askCasper = useCallback(
@@ -2527,12 +2754,29 @@ index 0000000..830bff8
 +              onSend={sendToCasper}
 +              currentUrl={currentUrl}
 +              pageContextAvailable={hasPageContext}
++              pageReadingAllowed={pageReading === 'allow'}
++              pageReadingCapable={native}
++              onTogglePageReading={() => {
++                if (pageReading === 'allow') {
++                  setPageReadingPref('deny');
++                  return;
++                }
++                setConsentOpen(true);
++              }}
 +              onClose={() => setCasperOpen(false)}
 +              onOpenAbout={() => setAboutOpen(true)}
 +            />
 +          </div>
 +        )}
 +      </div>
++
++      {consentOpen && (
++        <PageReadingConsent
++          host={currentUrl === NEWTAB ? null : hostOf(currentUrl)}
++          onAllow={() => resolveConsent('allow')}
++          onDeny={() => resolveConsent('deny')}
++        />
++      )}
 +
 +      {aboutOpen && (
 +        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 p-6" onClick={() => setAboutOpen(false)}>
@@ -2542,12 +2786,13 @@ index 0000000..830bff8
 +          >
 +            <h3 className="text-lg font-bold" style={{ fontFamily: 'Sora, Inter, sans-serif' }}>Haunted Browser</h3>
 +            <p className="mt-2 text-sm leading-relaxed text-[var(--hb-muted)]">
-+              Casper's agentic browser, ported from Haunted Browser. Tabs, an address bar, bookmarks, and a live Casper panel that can use his full tool loop — including page-aware summaries.
++              Casper&apos;s agentic browser. Chat still goes through Blood Sweat Code&apos;s existing
++              Casper command API — not a separate Haunted model service, and not the desktop Casper CLI sidecar.
 +            </p>
 +            <p className="mt-2 text-sm leading-relaxed text-[var(--hb-muted)]">
 +              {native
-+                ? 'You are in the Blood Sweat Code desktop app, so pages load in real Chromium with no iframe limits. Casper can read the page you are looking at.'
-+                : 'In a regular browser some sites block embedding. Open them externally, ask Casper about the URL, or use the desktop app for native Chromium tabs.'}
++                ? 'You are in the desktop app, so pages load in real Chromium with no iframe limits. Page text is sent to Casper only after you allow page reading — you can turn it off from the panel.'
++                : 'In a regular browser some sites block embedding. Casper sees the URL, not the page text. Use the desktop app for native Chromium tabs and optional page-aware summaries.'}
 +            </p>
 +            <button
 +              type="button"
@@ -2669,6 +2914,67 @@ index 0000000..bd0dc0b
 +          <Ghost className="h-3.5 w-3.5" />
 +          Casper can summarize, explain, and act on the page you are viewing.
 +        </p>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/components/haunted/PageReadingConsent.tsx b/src/components/haunted/PageReadingConsent.tsx
+new file mode 100644
+index 0000000..71f6998
+--- /dev/null
++++ b/src/components/haunted/PageReadingConsent.tsx
+@@ -0,0 +1,55 @@
++import { GhostMascot } from './ghost';
++
++export function PageReadingConsent({
++  host,
++  onAllow,
++  onDeny,
++}: {
++  host: string | null;
++  onAllow: () => void;
++  onDeny: () => void;
++}) {
++  return (
++    <div
++      className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 p-6"
++      data-testid="haunted-page-consent"
++    >
++      <div className="hb-glass-strong max-w-md rounded-2xl border border-[var(--hb-border)] p-5 shadow-2xl">
++        <div className="mb-3 flex justify-center">
++          <GhostMascot size={48} glow />
++        </div>
++        <h3 className="text-lg font-bold" style={{ fontFamily: 'Sora, Inter, sans-serif' }}>
++          Let Casper read this page?
++        </h3>
++        <p className="mt-2 text-sm leading-relaxed text-[var(--hb-muted)]">
++          Summarize, explain, and key-points send an excerpt of{' '}
++          <span className="font-medium text-[var(--hb-fg)]">{host ?? 'the current page'}</span> to
++          Casper on the Blood Sweat Code servers — up to 12,000 characters, plus any selected text.
++          Private dashboards, mail, docs, and source code will go with it if they are on screen.
++        </p>
++        <p className="mt-2 text-xs text-[var(--hb-muted)]">
++          You can turn page reading off later from Casper's panel. Page text is not stored as a
++          bookmark or history snapshot.
++        </p>
++        <div className="mt-4 flex flex-col gap-2">
++          <button
++            type="button"
++            data-testid="haunted-page-consent-allow"
++            onClick={onAllow}
++            className="h-10 w-full rounded-full bg-[var(--hb-primary)] text-sm font-medium text-[var(--hb-primary-fg)]"
++          >
++            Allow page reading
++          </button>
++          <button
++            type="button"
++            data-testid="haunted-page-consent-deny"
++            onClick={onDeny}
++            className="h-10 w-full rounded-full border border-[var(--hb-border)] text-sm text-[var(--hb-fg)]"
++          >
++            Keep URL only
++          </button>
++        </div>
 +      </div>
 +    </div>
 +  );
@@ -3211,6 +3517,269 @@ index 0000000..e9094d5
 +  border: 0;
 +  background: #fff;
 +}
+diff --git a/src/components/haunted/pageContext.test.ts b/src/components/haunted/pageContext.test.ts
+new file mode 100644
+index 0000000..9995616
+--- /dev/null
++++ b/src/components/haunted/pageContext.test.ts
+@@ -0,0 +1,124 @@
++import { describe, expect, it } from 'vitest';
++import {
++  PAGE_SELECTION_CAP,
++  PAGE_TEXT_CAP,
++  buildHauntedCasperCommand,
++  isFreshPageContext,
++  wantsPageInjection,
++} from './pageContext';
++import { NEWTAB, type PageContext } from './ghost';
++
++const PAGE = 'https://example.com/docs';
++
++function ctx(overrides: Partial<PageContext> = {}): PageContext {
++  return {
++    url: PAGE,
++    title: 'Docs',
++    text: 'Hello from the page.',
++    ...overrides,
++  };
++}
++
++describe('wantsPageInjection', () => {
++  it('is true for explicit inject or page-aware keywords', () => {
++    expect(wantsPageInjection('hello')).toBe(false);
++    expect(wantsPageInjection('hello', true)).toBe(true);
++    expect(wantsPageInjection('Summarize this page')).toBe(true);
++    expect(wantsPageInjection('key points please')).toBe(true);
++    expect(wantsPageInjection('explain')).toBe(true);
++  });
++});
++
++describe('isFreshPageContext', () => {
++  it('requires non-empty text that belongs to the active tab (hash ignored)', () => {
++    expect(isFreshPageContext(ctx(), PAGE)).toBe(true);
++    expect(isFreshPageContext(ctx({ url: `${PAGE}#section` }), PAGE)).toBe(true);
++    expect(isFreshPageContext(ctx({ url: 'https://other.example/' }), PAGE)).toBe(false);
++    expect(isFreshPageContext(ctx({ text: '   ' }), PAGE)).toBe(false);
++    expect(isFreshPageContext(null, PAGE)).toBe(false);
++    expect(isFreshPageContext(ctx(), NEWTAB)).toBe(false);
++  });
++});
++
++describe('buildHauntedCasperCommand', () => {
++  it('includes capped page text and selection when reading is allowed', () => {
++    const built = buildHauntedCasperCommand({
++      userText: 'Summarize this page',
++      currentUrl: PAGE,
++      tabTitle: 'Docs',
++      ctx: ctx({
++        text: 'X'.repeat(PAGE_TEXT_CAP + 500),
++        selection: 'Y'.repeat(PAGE_SELECTION_CAP + 200),
++      }),
++      injectPage: true,
++      pageReadingAllowed: true,
++    });
++
++    expect(built.includedPageText).toBe(true);
++    expect(built.includedChars).toBe(PAGE_TEXT_CAP);
++    expect(built.command).toContain('Page text:');
++    expect(built.command).toContain('X'.repeat(PAGE_TEXT_CAP));
++    expect(built.command).not.toContain('X'.repeat(PAGE_TEXT_CAP + 1));
++    expect(built.command).toContain('Y'.repeat(PAGE_SELECTION_CAP));
++    expect(built.command).not.toContain('Y'.repeat(PAGE_SELECTION_CAP + 1));
++    expect(built.command).toContain('User says: Summarize this page');
++  });
++
++  it('keeps URL-only context when page reading is off', () => {
++    const built = buildHauntedCasperCommand({
++      userText: 'Summarize this page',
++      currentUrl: PAGE,
++      tabTitle: 'Docs',
++      ctx: ctx({ text: 'secret dashboard contents' }),
++      injectPage: true,
++      pageReadingAllowed: false,
++    });
++
++    expect(built.includedPageText).toBe(false);
++    expect(built.includedChars).toBe(0);
++    expect(built.command).not.toContain('secret dashboard contents');
++    expect(built.command).not.toContain('Page text:');
++    expect(built.command).toContain('page reading is off');
++  });
++
++  it('does not attach another tab\'s snapshot even when reading is allowed', () => {
++    const built = buildHauntedCasperCommand({
++      userText: 'Summarize this page',
++      currentUrl: PAGE,
++      ctx: ctx({ url: 'https://mail.example/inbox', text: 'private inbox' }),
++      injectPage: true,
++      pageReadingAllowed: true,
++    });
++
++    expect(built.includedPageText).toBe(false);
++    expect(built.command).not.toContain('private inbox');
++  });
++
++  it('notes missing live text when inject is requested in the web app', () => {
++    const built = buildHauntedCasperCommand({
++      userText: 'Summarize this page',
++      currentUrl: PAGE,
++      ctx: null,
++      injectPage: true,
++      pageReadingAllowed: true,
++    });
++
++    expect(built.includedPageText).toBe(false);
++    expect(built.command).toContain('live page text is only readable');
++  });
++
++  it('sends a URL browse line without page text for ordinary chat', () => {
++    const built = buildHauntedCasperCommand({
++      userText: 'What can you do?',
++      currentUrl: PAGE,
++      tabTitle: 'Docs',
++      ctx: ctx(),
++      pageReadingAllowed: true,
++    });
++
++    expect(built.includedPageText).toBe(false);
++    expect(built.command).toContain(`[Haunted Browser viewing ${PAGE}`);
++    expect(built.command).not.toContain('Page text:');
++    expect(built.command).toContain('User says: What can you do?');
++  });
++});
+diff --git a/src/components/haunted/pageContext.ts b/src/components/haunted/pageContext.ts
+new file mode 100644
+index 0000000..c475812
+--- /dev/null
++++ b/src/components/haunted/pageContext.ts
+@@ -0,0 +1,65 @@
++import { NEWTAB, samePageUrl, type PageContext } from './ghost';
++
++export const PAGE_TEXT_CAP = 12_000;
++export const PAGE_SELECTION_CAP = 1_500;
++export const PAGE_INJECT_KEYWORDS =
++  /(summar|explain|this page|current page|fix site|fix this|about this|describe|key points|extract|tldr)/i;
++
++export function wantsPageInjection(userText: string, injectPage?: boolean): boolean {
++  return Boolean(injectPage) || PAGE_INJECT_KEYWORDS.test(userText);
++}
++
++export function isFreshPageContext(ctx: PageContext | null | undefined, currentUrl: string): boolean {
++  return Boolean(ctx?.text?.trim() && samePageUrl(ctx.url, currentUrl));
++}
++
++export function buildHauntedCasperCommand(input: {
++  userText: string;
++  currentUrl: string;
++  tabTitle?: string;
++  ctx: PageContext | null;
++  injectPage?: boolean;
++  pageReadingAllowed: boolean;
++}): { command: string; includedPageText: boolean; includedChars: number } {
++  const browseLine =
++    input.currentUrl === NEWTAB
++      ? '[Haunted Browser idle — new tab]'
++      : `[Haunted Browser viewing ${input.currentUrl}${input.tabTitle ? ` — "${input.tabTitle}"` : ''}]`;
++
++  const wants = wantsPageInjection(input.userText, input.injectPage);
++  const fresh = isFreshPageContext(input.ctx, input.currentUrl);
++
++  if (wants && fresh && input.pageReadingAllowed) {
++    const snippet = input.ctx!.text!.slice(0, PAGE_TEXT_CAP);
++    const selection = input.ctx!.selection?.trim()
++      ? `\n\nThe user has selected this text on the page — focus on it if relevant:\n"${input.ctx!.selection!.slice(0, PAGE_SELECTION_CAP)}"`
++      : '';
++    return {
++      command: `${browseLine}${selection}\n\nPage text:\n${snippet}\n\nUser says: ${input.userText}\n\n(Answer using the provided page text excerpt when relevant.)`,
++      includedPageText: true,
++      includedChars: snippet.length,
++    };
++  }
++
++  if (wants && !input.pageReadingAllowed && input.currentUrl !== NEWTAB) {
++    return {
++      command: `${browseLine}\n\nUser says: ${input.userText}\n\n(Note: page reading is off — I can see the URL but not the page text.)`,
++      includedPageText: false,
++      includedChars: 0,
++    };
++  }
++
++  if (input.injectPage && !fresh && input.currentUrl !== NEWTAB) {
++    return {
++      command: `${browseLine}\n\nUser says: ${input.userText}\n\n(Note: live page text is only readable in the Blood Sweat Code desktop app. I can still talk about this URL.)`,
++      includedPageText: false,
++      includedChars: 0,
++    };
++  }
++
++  return {
++    command: `${browseLine}\n\nUser says: ${input.userText}`,
++    includedPageText: false,
++    includedChars: 0,
++  };
++}
+diff --git a/src/components/haunted/pageReading.test.ts b/src/components/haunted/pageReading.test.ts
+new file mode 100644
+index 0000000..92bcdb9
+--- /dev/null
++++ b/src/components/haunted/pageReading.test.ts
+@@ -0,0 +1,24 @@
++import { beforeEach, describe, expect, it } from 'vitest';
++import { loadPageReading, savePageReading } from './pageReading';
++
++describe('page reading preference', () => {
++  beforeEach(() => {
++    window.localStorage.clear();
++  });
++
++  it('defaults to unset and round-trips per user', () => {
++    expect(loadPageReading('user-1')).toBe('unset');
++    savePageReading('user-1', 'allow');
++    savePageReading('user-2', 'deny');
++    expect(loadPageReading('user-1')).toBe('allow');
++    expect(loadPageReading('user-2')).toBe('deny');
++  });
++
++  it('treats invalid storage as unset and can clear', () => {
++    window.localStorage.setItem('bsc.haunted.pageReading.user-1', 'maybe');
++    expect(loadPageReading('user-1')).toBe('unset');
++    savePageReading('user-1', 'allow');
++    savePageReading('user-1', 'unset');
++    expect(loadPageReading('user-1')).toBe('unset');
++  });
++});
+diff --git a/src/components/haunted/pageReading.ts b/src/components/haunted/pageReading.ts
+new file mode 100644
+index 0000000..faedaae
+--- /dev/null
++++ b/src/components/haunted/pageReading.ts
+@@ -0,0 +1,26 @@
++export type PageReadingPref = 'unset' | 'allow' | 'deny';
++
++function storageKey(userId: string): string {
++  return `bsc.haunted.pageReading.${userId}`;
++}
++
++export function loadPageReading(userId: string): PageReadingPref {
++  if (typeof window === 'undefined' || !userId) return 'unset';
++  try {
++    const raw = window.localStorage.getItem(storageKey(userId));
++    if (raw === 'allow' || raw === 'deny') return raw;
++    return 'unset';
++  } catch {
++    return 'unset';
++  }
++}
++
++export function savePageReading(userId: string, pref: PageReadingPref): void {
++  if (typeof window === 'undefined' || !userId) return;
++  try {
++    if (pref === 'unset') window.localStorage.removeItem(storageKey(userId));
++    else window.localStorage.setItem(storageKey(userId), pref);
++  } catch {
++    /* quota / private mode */
++  }
++}
 diff --git a/src/components/haunted/webview.d.ts b/src/components/haunted/webview.d.ts
 new file mode 100644
 index 0000000..e1a23d8
@@ -3235,7 +3804,7 @@ index 0000000..e1a23d8
 +
 +export {};
 diff --git a/src/lib/desktop.ts b/src/lib/desktop.ts
-index e13f4f9..6a8fae2 100644
+index e13f4f9..8f765da 100644
 --- a/src/lib/desktop.ts
 +++ b/src/lib/desktop.ts
 @@ -4,8 +4,9 @@
@@ -3250,10 +3819,16 @@ index e13f4f9..6a8fae2 100644
   *
   * In a normal browser these helpers are inert: `isDesktopApp()` returns false
   * and the typed bridge is `null`, so callers can cleanly fall back to cloud
-@@ -66,6 +67,10 @@ export interface BscDesktopApi {
+@@ -62,10 +63,16 @@ export interface BscDesktopApi {
+     probe(target: LocalLlmTarget): Promise<ProviderStatus>;
+     chat(req: LocalChatRequest): Promise<unknown>;
+   };
++  /** Casper CLI sidecar (build/push/scrape). Haunted Browser chat does not use this. */
+   casper: {
      run(opts: CasperRunOptions): Promise<CasperRunResult>;
      version(): Promise<string>;
    };
++  /** Native <webview> chrome: Haunted Browser maps onShortcut actions in the renderer. */
 +  browser?: {
 +    webview: true;
 +    onShortcut(cb: (event: { action: string }) => void): () => void;
@@ -3261,7 +3836,7 @@ index e13f4f9..6a8fae2 100644
    onUpdateStatus(cb: (status: DesktopUpdateStatus) => void): () => void;
  }
  
-@@ -80,6 +85,11 @@ export function isDesktopApp(): boolean {
+@@ -80,6 +87,11 @@ export function isDesktopApp(): boolean {
    return typeof window !== 'undefined' && window.bscDesktop?.isDesktop === true;
  }
  

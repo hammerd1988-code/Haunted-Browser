@@ -19,13 +19,15 @@ import {
   clampZoom,
   hostOf,
   resolveAddress,
-  samePageUrl,
   uid,
   type ChatMessage,
   type PageContext,
   type Tab,
 } from './ghost';
 import { loadBookmarks, saveBookmarks, type HauntedBookmark } from './bookmarks';
+import { buildHauntedCasperCommand, isFreshPageContext, wantsPageInjection } from './pageContext';
+import { loadPageReading, savePageReading, type PageReadingPref } from './pageReading';
+import { PageReadingConsent } from './PageReadingConsent';
 import { sendCasperCommand } from '../../lib/casper';
 import { getDesktopBridge, isHauntedWebview } from '../../lib/desktop';
 import { cn } from '../../lib/utils';
@@ -59,6 +61,9 @@ export function HauntedBrowser({ userId, onClose, isExpanded, onToggleExpand }: 
   const [hasPageContext, setHasPageContext] = useState(false);
   const pageContextRef = useRef<PageContext | null>(null);
   const native = isHauntedWebview();
+  const [pageReading, setPageReading] = useState<PageReadingPref>(() => loadPageReading(userId));
+  const [consentOpen, setConsentOpen] = useState(false);
+  const pendingSendRef = useRef<{ text: string; injectPage?: boolean } | null>(null);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
   const currentUrl = activeTab.url;
@@ -239,29 +244,32 @@ export function HauntedBrowser({ userId, onClose, isExpanded, onToggleExpand }: 
   }, [dispatchShortcut, findOpen]);
 
   const sendToCasper = useCallback(
-    async (text: string, opts: { injectPage?: boolean } = {}) => {
+    async (
+      text: string,
+      opts: { injectPage?: boolean } = {},
+      override?: { pageReading?: PageReadingPref },
+    ) => {
       if (streaming) return;
+      const readingPref = override?.pageReading ?? pageReading;
+      const wants = wantsPageInjection(text, opts.injectPage);
+      const fresh = isFreshPageContext(pageContextRef.current, currentUrl);
+      if (wants && fresh && readingPref === 'unset') {
+        pendingSendRef.current = { text, injectPage: opts.injectPage };
+        setConsentOpen(true);
+        setCasperOpen(true);
+        return;
+      }
+
       const userMsg: ChatMessage = { id: uid(), role: 'user', content: text };
       const asstId = uid();
-      const ctx = pageContextRef.current;
-      const pageKeywords = /(summar|explain|this page|current page|fix site|fix this|about this|describe|key points|extract|tldr)/i;
-      const shouldInject = opts.injectPage || pageKeywords.test(text);
-      const ctxFresh = !!(ctx?.text && ctx.text.trim() && samePageUrl(ctx.url, currentUrl));
-
-      const browseLine = currentUrl === NEWTAB
-        ? '[Haunted Browser idle — new tab]'
-        : `[Haunted Browser viewing ${currentUrl}${activeTab.title ? ` — "${activeTab.title}"` : ''}]`;
-
-      let command = `${browseLine}\n\nUser says: ${text}`;
-      if (ctxFresh && shouldInject) {
-        const snippet = ctx!.text!.slice(0, 12000);
-        const selection = ctx!.selection?.trim()
-          ? `\n\nThe user has selected this text on the page — focus on it if relevant:\n"${ctx!.selection!.slice(0, 1500)}"`
-          : '';
-        command = `${browseLine}${selection}\n\nPage text:\n${snippet}\n\nUser says: ${text}\n\n(Answer using the provided page text excerpt when relevant.)`;
-      } else if (opts.injectPage && !ctxFresh && currentUrl !== NEWTAB) {
-        command = `${browseLine}\n\nUser says: ${text}\n\n(Note: live page text is only readable in the Blood Sweat Code desktop app. I can still talk about this URL.)`;
-      }
+      const built = buildHauntedCasperCommand({
+        userText: text,
+        currentUrl,
+        tabTitle: activeTab.title,
+        ctx: pageContextRef.current,
+        injectPage: opts.injectPage,
+        pageReadingAllowed: readingPref === 'allow',
+      });
 
       setMessages((prev) => [...prev, userMsg, { id: asstId, role: 'assistant', content: '', pending: true }]);
       setStreaming(true);
@@ -270,15 +278,22 @@ export function HauntedBrowser({ userId, onClose, isExpanded, onToggleExpand }: 
           .filter((m) => m.role !== 'system' && m.content.trim() && !m.pending)
           .map((m) => ({ role: m.role === 'user' ? 'user' as const : 'casper' as const, text: m.content }));
         const result = await sendCasperCommand({
-          command,
+          command: built.command,
           conversationHistory,
           surface: 'control_center',
           pageContext: {
             path: '/casper',
             feature: 'Haunted Browser',
-            description: 'agentic Casper browser with live page context',
+            description: built.includedPageText
+              ? `agentic Casper browser; page excerpt included (${built.includedChars} chars)`
+              : 'agentic Casper browser; URL context only',
           },
-          metadata: { client: 'haunted-browser', url: currentUrl, native },
+          metadata: {
+            client: 'haunted-browser',
+            url: currentUrl,
+            native,
+            pageTextIncluded: built.includedPageText,
+          },
         });
         const casperText = result.response || 'No response.';
         setMessages((prev) => prev.map((m) => (m.id === asstId ? { ...m, content: casperText, pending: false } : m)));
@@ -289,7 +304,29 @@ export function HauntedBrowser({ userId, onClose, isExpanded, onToggleExpand }: 
         setStreaming(false);
       }
     },
-    [messages, streaming, currentUrl, activeTab.title, native],
+    [messages, streaming, currentUrl, activeTab.title, native, pageReading],
+  );
+
+  const resolveConsent = useCallback(
+    (pref: Exclude<PageReadingPref, 'unset'>) => {
+      savePageReading(userId, pref);
+      setPageReading(pref);
+      setConsentOpen(false);
+      const pending = pendingSendRef.current;
+      pendingSendRef.current = null;
+      if (pending) {
+        void sendToCasper(pending.text, { injectPage: pending.injectPage }, { pageReading: pref });
+      }
+    },
+    [userId, sendToCasper],
+  );
+
+  const setPageReadingPref = useCallback(
+    (pref: PageReadingPref) => {
+      savePageReading(userId, pref);
+      setPageReading(pref);
+    },
+    [userId],
   );
 
   const askCasper = useCallback(
@@ -405,12 +442,29 @@ export function HauntedBrowser({ userId, onClose, isExpanded, onToggleExpand }: 
               onSend={sendToCasper}
               currentUrl={currentUrl}
               pageContextAvailable={hasPageContext}
+              pageReadingAllowed={pageReading === 'allow'}
+              pageReadingCapable={native}
+              onTogglePageReading={() => {
+                if (pageReading === 'allow') {
+                  setPageReadingPref('deny');
+                  return;
+                }
+                setConsentOpen(true);
+              }}
               onClose={() => setCasperOpen(false)}
               onOpenAbout={() => setAboutOpen(true)}
             />
           </div>
         )}
       </div>
+
+      {consentOpen && (
+        <PageReadingConsent
+          host={currentUrl === NEWTAB ? null : hostOf(currentUrl)}
+          onAllow={() => resolveConsent('allow')}
+          onDeny={() => resolveConsent('deny')}
+        />
+      )}
 
       {aboutOpen && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 p-6" onClick={() => setAboutOpen(false)}>
@@ -420,12 +474,13 @@ export function HauntedBrowser({ userId, onClose, isExpanded, onToggleExpand }: 
           >
             <h3 className="text-lg font-bold" style={{ fontFamily: 'Sora, Inter, sans-serif' }}>Haunted Browser</h3>
             <p className="mt-2 text-sm leading-relaxed text-[var(--hb-muted)]">
-              Casper's agentic browser, ported from Haunted Browser. Tabs, an address bar, bookmarks, and a live Casper panel that can use his full tool loop — including page-aware summaries.
+              Casper&apos;s agentic browser. Chat still goes through Blood Sweat Code&apos;s existing
+              Casper command API — not a separate Haunted model service, and not the desktop Casper CLI sidecar.
             </p>
             <p className="mt-2 text-sm leading-relaxed text-[var(--hb-muted)]">
               {native
-                ? 'You are in the Blood Sweat Code desktop app, so pages load in real Chromium with no iframe limits. Casper can read the page you are looking at.'
-                : 'In a regular browser some sites block embedding. Open them externally, ask Casper about the URL, or use the desktop app for native Chromium tabs.'}
+                ? 'You are in the desktop app, so pages load in real Chromium with no iframe limits. Page text is sent to Casper only after you allow page reading — you can turn it off from the panel.'
+                : 'In a regular browser some sites block embedding. Casper sees the URL, not the page text. Use the desktop app for native Chromium tabs and optional page-aware summaries.'}
             </p>
             <button
               type="button"

@@ -10,6 +10,9 @@ export function CasperPanel({
   onSend,
   currentUrl,
   pageContextAvailable,
+  pageReadingAllowed,
+  pageReadingCapable,
+  onTogglePageReading,
   onClose,
   onOpenAbout,
 }: {
@@ -18,6 +21,9 @@ export function CasperPanel({
   onSend: (text: string, opts?: { injectPage?: boolean }) => void;
   currentUrl: string;
   pageContextAvailable: boolean;
+  pageReadingAllowed: boolean;
+  pageReadingCapable: boolean;
+  onTogglePageReading: () => void;
   onClose: () => void;
   onOpenAbout: () => void;
 }) {
@@ -72,6 +78,22 @@ export function CasperPanel({
           </div>
           <p className="truncate text-xs text-[var(--hb-muted)]">Ghost in the machine · watching this tab</p>
         </div>
+        {pageReadingCapable && (
+          <button
+            type="button"
+            data-testid="haunted-share-page"
+            aria-pressed={pageReadingAllowed}
+            onClick={onTogglePageReading}
+            className={cn(
+              'shrink-0 rounded-full px-2 py-1 text-[10px] font-medium',
+              pageReadingAllowed
+                ? 'bg-[color-mix(in_srgb,var(--hb-primary)_18%,transparent)] text-[var(--hb-primary)]'
+                : 'bg-[var(--hb-accent)] text-[var(--hb-muted)] hover:text-[var(--hb-fg)]',
+            )}
+          >
+            {pageReadingAllowed ? 'Sharing page' : 'Share page'}
+          </button>
+        )}
         <button type="button" aria-label="About Haunted Browser" onClick={onOpenAbout} className="rounded-md p-1.5 text-[var(--hb-muted)] transition-colors hover:bg-[var(--hb-accent)] hover:text-[var(--hb-fg)]">
           <Info className="h-4 w-4" />
         </button>
@@ -80,11 +102,19 @@ export function CasperPanel({
         </button>
       </div>
 
-      {pageContextAvailable && (
-        <div className="flex items-center gap-1.5 px-4 pt-2 text-[11px] text-[color-mix(in_srgb,var(--hb-primary)_80%,transparent)]">
+      {(pageReadingCapable || pageContextAvailable) && (
+        <div
+          className="flex items-center gap-1.5 px-4 pt-2 text-[11px] text-[color-mix(in_srgb,var(--hb-primary)_80%,transparent)]"
+          data-testid="haunted-page-status"
+        >
           <FileText className="h-3 w-3" />
-          Reading {host ?? 'this page'}
-          <span className="text-[var(--hb-muted)]">· context ready</span>
+          {pageReadingAllowed
+            ? pageContextAvailable
+              ? `Will send page text · ${host ?? 'this page'}`
+              : 'Page reading on · waiting for page text'
+            : pageContextAvailable
+              ? 'Page ready · sharing off (URL only)'
+              : 'URL context only · page sharing off'}
         </div>
       )}
 

@@ -63,10 +63,12 @@ export interface BscDesktopApi {
     probe(target: LocalLlmTarget): Promise<ProviderStatus>;
     chat(req: LocalChatRequest): Promise<unknown>;
   };
+  /** Casper CLI sidecar (build/push/scrape). Haunted Browser chat does not use this. */
   casper: {
     run(opts: CasperRunOptions): Promise<CasperRunResult>;
     version(): Promise<string>;
   };
+  /** Native <webview> chrome: Haunted Browser maps onShortcut actions in the renderer. */
   browser?: {
     webview: true;
     onShortcut(cb: (event: { action: string }) => void): () => void;
