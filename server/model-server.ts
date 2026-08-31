@@ -174,6 +174,11 @@ export async function probeRemoteServer(opts: {
     return { connected: true, demo: false, baseUrl, origin, models };
   } catch (err) {
     const status = (err as { status?: number })?.status;
+    // Some OpenAI-compatible proxies gate or omit /models while still serving
+    // /chat/completions — treat "endpoint unsupported" as connected.
+    if (status === 404 || status === 405 || status === 501) {
+      return { connected: true, demo: false, baseUrl, origin, models: [] };
+    }
     if (status === 401 || status === 403) {
       return {
         connected: false,

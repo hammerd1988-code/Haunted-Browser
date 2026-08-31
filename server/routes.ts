@@ -8,6 +8,7 @@ import {
   probeRemoteServer,
   stripToOrigin,
 } from "./model-server";
+import { runSsh, STATUS_COMMAND, type SshConfig } from "./ssh";
 import {
   CLOUD_BASES,
   CLOUD_MODEL_SUGGESTIONS,
@@ -147,6 +148,17 @@ async function probeEngine(
   return probe;
 }
 
+async function loadSshConfig(): Promise<SshConfig & { guiUrl: string }> {
+  const all = await storage.getAllSettings();
+  return {
+    host: all.sshHost || "",
+    user: all.sshUser || "",
+    port: parseInt(all.sshPort || "22", 10) || 22,
+    keyPath: all.sshKeyPath || "",
+    guiUrl: all.serverGuiUrl || "",
+  };
+}
+
 async function probeSavedServer(opts: { url?: string; discover?: boolean; timeoutMs?: number } = {}) {
   const cfg = await loadEngineConfig();
   return probeEngine(cfg, opts);
@@ -172,12 +184,18 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
   // ---- Settings ----
   app.get("/api/settings", async (_req, res) => {
     const cfg = await loadEngineConfig();
+    const ssh = await loadSshConfig();
     res.json({
       engine: cfg.engine,
       ollamaUrl: cfg.localUrl,
       customBaseUrl: cfg.customBaseUrl,
       model: cfg.model,
       apiKey: cfg.apiKey,
+      sshHost: ssh.host,
+      sshUser: ssh.user,
+      sshPort: String(ssh.port),
+      sshKeyPath: ssh.keyPath,
+      serverGuiUrl: ssh.guiUrl,
     });
   });
 
@@ -188,7 +206,38 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
     if (typeof customBaseUrl === "string") await storage.setSetting("customBaseUrl", customBaseUrl.trim());
     if (typeof model === "string") await storage.setSetting("model", model);
     if (typeof apiKey === "string") await storage.setSetting("apiKey", apiKey);
+    const { sshHost, sshUser, sshPort, sshKeyPath, serverGuiUrl } = req.body ?? {};
+    if (typeof sshHost === "string") await storage.setSetting("sshHost", sshHost.trim());
+    if (typeof sshUser === "string") await storage.setSetting("sshUser", sshUser.trim());
+    if (typeof sshPort === "string") await storage.setSetting("sshPort", sshPort.trim());
+    if (typeof sshKeyPath === "string") await storage.setSetting("sshKeyPath", sshKeyPath.trim());
+    if (typeof serverGuiUrl === "string") await storage.setSetting("serverGuiUrl", serverGuiUrl.trim());
     res.json({ ok: true });
+  });
+
+  // ---- Server node (SSH) ----
+  // Loopback-only like everything else here; commands go through the system
+  // OpenSSH client in BatchMode with timeouts and capped output (see ssh.ts).
+  app.get("/api/ssh/status", async (_req, res) => {
+    const ssh = await loadSshConfig();
+    if (!ssh.host) return res.json({ configured: false, connected: false, guiUrl: ssh.guiUrl });
+    const r = await runSsh(ssh, "echo casper-ok", 12_000);
+    res.json({
+      configured: true,
+      connected: r.ok && r.output.includes("casper-ok"),
+      error: r.error,
+      host: ssh.host,
+      guiUrl: ssh.guiUrl,
+    });
+  });
+
+  app.post("/api/ssh/run", async (req, res) => {
+    const command = typeof req.body?.command === "string" ? req.body.command : "";
+    if (!command.trim()) return res.status(400).json({ ok: false, error: "command required" });
+    if (command.length > 2000) return res.status(400).json({ ok: false, error: "command too long" });
+    const ssh = await loadSshConfig();
+    const r = await runSsh(ssh, command === "__STATUS__" ? STATUS_COMMAND : command);
+    res.json(r);
   });
 
   // ---- Status + models ----
@@ -447,9 +496,12 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
   app.post("/api/agent/step", async (req, res) => {
     const { messages, model } = req.body ?? {};
     const history = Array.isArray(messages) ? messages : [];
+    if (history.length > 200) {
+      return res.status(400).json({ error: "Too many messages in one agent run." });
+    }
     const cleanHistory = history
       .filter((m) => ["system", "user", "assistant"].includes(m?.role) && typeof m?.content === "string")
-      .map((m) => ({ role: m.role, content: m.content }));
+      .map((m) => ({ role: m.role, content: String(m.content).slice(0, 60_000) }));
 
     const saved = await loadEngineConfig();
     const probe = await probeEngine(saved, { timeoutMs: 4000 });

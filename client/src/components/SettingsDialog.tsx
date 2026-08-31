@@ -20,6 +20,11 @@ const ENGINE_OPTIONS: { value: EngineType; label: string }[] = [
 
 const isLocal = (e: EngineType) => e === "lmstudio" || e === "ollama";
 
+const LOCAL_DEFAULT_URLS: Record<string, string> = {
+  lmstudio: "http://127.0.0.1:1234",
+  ollama: "http://127.0.0.1:11434",
+};
+
 export function SettingsDialog({
   open,
   onOpenChange,
@@ -29,6 +34,7 @@ export function SettingsDialog({
   customBaseUrl,
   model,
   apiKey,
+  ssh,
   onSave,
   onTest,
 }: {
@@ -40,6 +46,7 @@ export function SettingsDialog({
   customBaseUrl: string;
   model: string;
   apiKey: string;
+  ssh: { sshHost: string; sshUser: string; sshPort: string; sshKeyPath: string; serverGuiUrl: string };
   onSave: (settings: EngineSettings) => void;
   onTest: (url: string, opts?: { discover?: boolean }) => Promise<CasperStatus | void> | void;
 }) {
@@ -48,6 +55,7 @@ export function SettingsDialog({
   const [draftCustomUrl, setDraftCustomUrl] = useState(customBaseUrl);
   const [draftModel, setDraftModel] = useState(model);
   const [draftKey, setDraftKey] = useState(apiKey);
+  const [draftSsh, setDraftSsh] = useState(ssh);
   const [testing, setTesting] = useState(false);
   const [update, setUpdate] = useState<{ type: string; version?: string; message?: string; percent?: number } | null>(null);
 
@@ -60,8 +68,22 @@ export function SettingsDialog({
       setDraftCustomUrl(customBaseUrl);
       setDraftModel(model);
       setDraftKey(apiKey);
+      setDraftSsh(ssh);
     }
-  }, [open, engine, ollamaUrl, customBaseUrl, model, apiKey]);
+  }, [open, engine, ollamaUrl, customBaseUrl, model, apiKey, ssh]);
+
+  // Switching engines resets engine-specific fields so a stale URL or model
+  // from a different engine is never silently carried over.
+  function changeEngine(next: EngineType) {
+    if (next === draftEngine) return;
+    if (isLocal(next)) {
+      const keep = draftEngine !== "lmstudio" && draftEngine !== "ollama" ? "" : draftUrl;
+      const wasOtherDefault = Object.values(LOCAL_DEFAULT_URLS).includes(keep);
+      if (!keep || wasOtherDefault) setDraftUrl(LOCAL_DEFAULT_URLS[next]);
+    }
+    setDraftModel("");
+    setDraftEngine(next);
+  }
 
   useEffect(() => {
     const bridge = (window as any).casperElectron;
@@ -103,7 +125,7 @@ export function SettingsDialog({
               id="engine"
               data-testid="select-engine"
               value={draftEngine}
-              onChange={(e) => setDraftEngine(e.target.value as EngineType)}
+              onChange={(e) => changeEngine(e.target.value as EngineType)}
               className="flex h-10 w-full rounded-md border border-input bg-background/70 px-3 text-sm outline-none focus:border-primary/60"
             >
               {ENGINE_OPTIONS.map((o) => (
@@ -255,6 +277,50 @@ export function SettingsDialog({
             </p>
           </div>
 
+          <div className="space-y-2" data-testid="server-node-section">
+            <Label>Server node (SSH)</Label>
+            <p className="text-xs text-muted-foreground">
+              Give Casper a server to look after — it can monitor health, manage services, and run
+              maintenance over SSH (key auth only, never passwords).
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <Input
+                data-testid="input-ssh-host"
+                value={draftSsh.sshHost}
+                onChange={(e) => setDraftSsh((s) => ({ ...s, sshHost: e.target.value }))}
+                placeholder="Host (e.g. 203.0.113.7)"
+              />
+              <Input
+                data-testid="input-ssh-user"
+                value={draftSsh.sshUser}
+                onChange={(e) => setDraftSsh((s) => ({ ...s, sshUser: e.target.value }))}
+                placeholder="User (e.g. ubuntu)"
+              />
+              <Input
+                data-testid="input-ssh-port"
+                value={draftSsh.sshPort}
+                onChange={(e) => setDraftSsh((s) => ({ ...s, sshPort: e.target.value }))}
+                placeholder="Port (22)"
+              />
+              <Input
+                data-testid="input-ssh-key"
+                value={draftSsh.sshKeyPath}
+                onChange={(e) => setDraftSsh((s) => ({ ...s, sshKeyPath: e.target.value }))}
+                placeholder="Private key path (optional)"
+              />
+            </div>
+            <Input
+              data-testid="input-server-gui-url"
+              value={draftSsh.serverGuiUrl}
+              onChange={(e) => setDraftSsh((s) => ({ ...s, serverGuiUrl: e.target.value }))}
+              placeholder="Server dashboard URL (Local Coder / NEO//OPS Ubuntu GUI)"
+            />
+            <p className="text-xs text-muted-foreground">
+              The dashboard URL lets Casper open your Ubuntu server GUI in a tab for visual
+              monitoring alongside SSH.
+            </p>
+          </div>
+
           {isElectron && (
             <div className="space-y-2" data-testid="updates-section">
               <Label>Updates</Label>
@@ -333,6 +399,7 @@ export function SettingsDialog({
                 customBaseUrl: draftCustomUrl,
                 model: draftModel || models[0] || "",
                 apiKey: draftKey,
+                ...draftSsh,
               });
               onOpenChange(false);
             }}

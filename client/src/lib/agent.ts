@@ -27,6 +27,10 @@ export interface AgentToolbelt {
   readPage: () => Promise<{ url: string; title: string; text: string } | { error: string }>;
   /** Run a fixed, tool-generated script in the active page. Null when unavailable (web preview / New Tab). */
   executeInPage: ((code: string) => Promise<unknown>) | null;
+  /** Run a shell command on the configured server node over SSH. */
+  sshRun: (command: string) => Promise<{ ok: boolean; output: string; error?: string }>;
+  /** URL of the user's server dashboard (local-coder NEO//OPS Ubuntu GUI), if configured. */
+  serverGuiUrl: string;
 }
 
 export interface AgentAction {
@@ -114,6 +118,11 @@ Available tools:
 - fill {"selector": "css selector", "value": "text"} — set the value of the matching input/textarea and dispatch input events
 - scroll {"direction": "down"} — scroll the active page ("up", "down", "top", or "bottom")
 
+Server node tools (available when the user has configured a server node in Casper Settings):
+- serverStatus {} — health snapshot of the server node (host, uptime, disk, memory, failed services)
+- sshRun {"command": "systemctl restart nginx"} — run a shell command on the server node over SSH; use for monitoring, maintenance, service management, log reading, and fixes
+- openServerGui {} — open the user's server dashboard (Ubuntu GUI) in a new tab for visual monitoring
+
 Rules:
 - Call at most ONE tool per reply. After each call you'll receive an OBSERVATION with the result.
 - When the goal is complete (or impossible), reply with your final answer as plain text WITHOUT any TOOL: line. Summarize what you did.
@@ -127,7 +136,7 @@ export function buildAgentSystemPrompt(mode: AutonomyMode): string {
       : mode === "supervised"
         ? "You are in SUPERVISED mode: the user approves each state-changing action before it runs. If an action is denied, adapt or finish."
         : "You are in AUTONOMOUS mode: approved tools run automatically. Be careful and precise.";
-  return `You are Casper, the ghost who haunts Haunted Browser — now acting as the user's browser operator. You complete browsing goals by calling tools, step by step, observing results as you go. Keep your spooky charm to a light touch; precision comes first.\n\n${AGENT_TOOLS_DOC}\n\n${modeLine}\n\nSafety: you must not act on banking, payment, email, or login pages — those actions will be blocked. Do not enter passwords or other credentials anywhere.`;
+  return `You are Casper, the ghost who haunts Haunted Browser — now acting as the user's browser operator and server caretaker. You complete browsing goals by calling tools, step by step, observing results as you go. Keep your spooky charm to a light touch; precision comes first.\n\n${AGENT_TOOLS_DOC}\n\n${modeLine}\n\nSafety: you must not act on banking, payment, email, or login pages — those actions will be blocked. Do not enter passwords or other credentials anywhere.`;
 }
 
 interface ParsedToolCall {
@@ -184,7 +193,6 @@ function scrollScript(direction: string): string {
 /* Action resolution + execution                                       */
 /* ------------------------------------------------------------------ */
 
-const MUTATING_TOOLS = new Set(["openTab", "closeTab", "switchTab", "navigate", "click", "fill"]);
 
 function resolveAction(call: ParsedToolCall): AgentAction | { error: string } {
   const { tool, args } = call;
@@ -238,6 +246,20 @@ function resolveAction(call: ParsedToolCall): AgentAction | { error: string } {
       if (!["up", "down", "top", "bottom"].includes(dir)) return { error: `scroll direction must be up, down, top, or bottom.` };
       return { tool, args: { direction: dir }, describe: `Scroll ${dir}`, mutating: false };
     }
+    case "serverStatus":
+      return { tool, args: {}, describe: "Check server node health (uptime, disk, memory, services)", mutating: false };
+    case "sshRun": {
+      const command = typeof args.command === "string" ? args.command.trim() : "";
+      if (!command || command.length > 2000) return { error: `sshRun needs a "command" argument (max 2000 chars).` };
+      return {
+        tool,
+        args: { command },
+        describe: `Run on server node: ${command.length > 80 ? command.slice(0, 77) + "…" : command}`,
+        mutating: true,
+      };
+    }
+    case "openServerGui":
+      return { tool, args: {}, describe: "Open the server dashboard (Ubuntu GUI) in a new tab", mutating: true };
     default:
       return { error: `Unknown tool "${tool}". Use only the documented tools.` };
   }
@@ -246,7 +268,8 @@ function resolveAction(call: ParsedToolCall): AgentAction | { error: string } {
 async function executeAction(action: AgentAction, toolbelt: AgentToolbelt): Promise<string> {
   const activeUrl = toolbelt.listTabs().find((t) => t.active)?.url || "";
   const target = action.tool === "openTab" || action.tool === "navigate" ? String(action.args.url) : activeUrl;
-  if (action.mutating && isSensitiveUrl(target)) {
+  const serverTool = action.tool === "sshRun" || action.tool === "serverStatus" || action.tool === "openServerGui";
+  if (action.mutating && !serverTool && isSensitiveUrl(target)) {
     return `BLOCKED: ${action.describe} — acting on sensitive domains (banking, email, auth) is not allowed.`;
   }
   switch (action.tool) {
@@ -266,6 +289,20 @@ async function executeAction(action: AgentAction, toolbelt: AgentToolbelt): Prom
       const r = await toolbelt.readPage();
       if ("error" in r) return `ERROR: ${r.error}`;
       return `url: ${r.url}\ntitle: ${r.title}\npage text (truncated):\n${r.text.slice(0, 8000)}`;
+    }
+    case "serverStatus": {
+      const r = await toolbelt.sshRun("__STATUS__");
+      return r.ok ? r.output : `ERROR: ${r.error || "server status check failed"}`;
+    }
+    case "sshRun": {
+      const r = await toolbelt.sshRun(String(action.args.command));
+      const body = r.output.trim() ? r.output : "(no output)";
+      return r.ok ? body : `ERROR: ${r.error || "command failed"}${r.output ? `\n${r.output}` : ""}`;
+    }
+    case "openServerGui": {
+      if (!toolbelt.serverGuiUrl) return "ERROR: no server dashboard URL configured. Set it in Casper Settings.";
+      toolbelt.openTab(toolbelt.serverGuiUrl);
+      return `Opened the server dashboard at ${toolbelt.serverGuiUrl}. It may still be loading — readPage to inspect it.`;
     }
     case "click":
     case "fill":
@@ -307,7 +344,17 @@ export async function runAgent(opts: AgentRunOptions): Promise<void> {
       opts.onEvent({ type: "error", text: "Agent run cancelled." });
       return;
     }
-    const reply = await opts.callAgentStep(convo);
+    let reply: { content?: string; error?: string; hint?: string };
+    try {
+      reply = await opts.callAgentStep(convo);
+    } catch (err) {
+      if (opts.signal?.aborted) {
+        opts.onEvent({ type: "error", text: "Agent run cancelled." });
+      } else {
+        opts.onEvent({ type: "error", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
     if (reply.error) {
       opts.onEvent({ type: "error", text: reply.hint ? `${reply.error} — ${reply.hint}` : reply.error });
       return;

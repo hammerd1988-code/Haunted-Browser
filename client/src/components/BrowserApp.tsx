@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { TabBar } from "./TabBar";
 import { Toolbar } from "./Toolbar";
@@ -17,6 +17,7 @@ import {
   saveSettings,
   streamChat,
   agentStep,
+  sshRun,
   type EngineSettings,
 } from "@/lib/api";
 import type { Tab, ChatMessage, CasperStatus } from "@/lib/ghost";
@@ -66,6 +67,17 @@ export function BrowserApp() {
   const currentUrl = activeTab.url;
   const isBookmarked = bookmarks.some((b) => b.url === currentUrl);
   const model = settingsQuery.data?.model || status.models[0] || "";
+
+  const sshSettings = useMemo(
+    () => ({
+      sshHost: settingsQuery.data?.sshHost ?? "",
+      sshUser: settingsQuery.data?.sshUser ?? "",
+      sshPort: settingsQuery.data?.sshPort ?? "22",
+      sshKeyPath: settingsQuery.data?.sshKeyPath ?? "",
+      serverGuiUrl: settingsQuery.data?.serverGuiUrl ?? "",
+    }),
+    [settingsQuery.data],
+  );
 
   // Backstop clear: whenever the active tab or its URL changes (including to
   // New Tab, where the webview is unmounted and no navigation clear fires),
@@ -152,8 +164,9 @@ export function BrowserApp() {
           setActiveId(fresh.id);
           return [fresh];
         }
-        const newActive = prev[idx + 1] ?? prev[idx - 1];
-        setActiveId(newActive.id);
+        // Only move focus when the closed tab was the active one; closing a
+        // background tab must not steal focus from the page being viewed.
+        setActiveId((cur) => (cur === id ? (prev[idx + 1] ?? prev[idx - 1]).id : cur));
         return next;
       });
     },
@@ -433,6 +446,8 @@ export function BrowserApp() {
         get executeInPage() {
           return pageExecutorRef.current;
         },
+        sshRun: (command: string) => sshRun(command),
+        serverGuiUrl: settingsQuery.data?.serverGuiUrl || "",
       };
 
       try {
@@ -441,7 +456,7 @@ export function BrowserApp() {
           mode: agentMode,
           toolbelt,
           signal: ctrl.signal,
-          callAgentStep: (msgs) => agentStep(msgs, model),
+          callAgentStep: (msgs) => agentStep(msgs, model, ctrl.signal),
           requestApproval: (action) =>
             new Promise<boolean>((resolve) => {
               setPendingApproval(action);
@@ -474,7 +489,7 @@ export function BrowserApp() {
         agentAbortRef.current = null;
       }
     },
-    [agentRunning, streaming, agentMode, model, closeTab],
+    [agentRunning, streaming, agentMode, model, closeTab, settingsQuery.data?.serverGuiUrl],
   );
 
   const resolveApproval = useCallback((ok: boolean) => {
@@ -633,6 +648,7 @@ export function BrowserApp() {
         customBaseUrl={settingsQuery.data?.customBaseUrl ?? ""}
         model={model}
         apiKey={settingsQuery.data?.apiKey ?? ""}
+        ssh={sshSettings}
         onSave={handleSaveSettings}
         onTest={testConnection}
       />

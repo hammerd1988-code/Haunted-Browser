@@ -46,6 +46,11 @@ export interface EngineSettings {
   customBaseUrl: string;
   model: string;
   apiKey: string;
+  sshHost: string;
+  sshUser: string;
+  sshPort: string;
+  sshKeyPath: string;
+  serverGuiUrl: string;
 }
 
 export async function fetchSettings(): Promise<EngineSettings> {
@@ -60,13 +65,24 @@ export async function saveSettings(body: Partial<EngineSettings>) {
 export async function agentStep(
   messages: { role: string; content: string }[],
   model: string,
+  signal?: AbortSignal,
 ): Promise<{ content?: string; error?: string; hint?: string; demo?: boolean }> {
   const res = await fetch(`${API_BASE}/api/agent/step`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, model }),
+    signal,
   });
   if (!res.ok) return { error: `Agent request failed (${res.status})` };
+  return res.json();
+}
+
+export async function sshRun(command: string): Promise<{ ok: boolean; output: string; error?: string }> {
+  const res = await fetch(`${API_BASE}/api/ssh/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command }),
+  });
   return res.json();
 }
 
