@@ -232,6 +232,15 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
 
   app.post("/api/settings", async (req, res) => {
     const { engine, ollamaUrl, customBaseUrl, model, apiKey } = req.body ?? {};
+    // Validate everything before the first write so a rejected save never
+    // persists a partial settings update.
+    const sshPortRaw = typeof req.body?.sshPort === "string" ? req.body.sshPort.trim() : undefined;
+    if (
+      sshPortRaw &&
+      (!/^\d{1,5}$/.test(sshPortRaw) || parseInt(sshPortRaw, 10) < 1 || parseInt(sshPortRaw, 10) > 65535)
+    ) {
+      return res.status(400).json({ error: "SSH port must be a number between 1 and 65535." });
+    }
     if (isEngineType(engine)) await storage.setSetting("engine", engine);
     if (typeof ollamaUrl === "string") await storage.setSetting("ollamaUrl", stripToOrigin(ollamaUrl));
     if (typeof customBaseUrl === "string") await storage.setSetting("customBaseUrl", customBaseUrl.trim());
@@ -240,16 +249,10 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
     // the saved key"; an explicit null clears it.
     if (apiKey === null) await storage.setSetting("apiKey", "");
     else if (typeof apiKey === "string" && apiKey) await storage.setSetting("apiKey", apiKey);
-    const { sshHost, sshUser, sshPort, sshKeyPath, serverGuiUrl } = req.body ?? {};
+    const { sshHost, sshUser, sshKeyPath, serverGuiUrl } = req.body ?? {};
     if (typeof sshHost === "string") await storage.setSetting("sshHost", sshHost.trim());
     if (typeof sshUser === "string") await storage.setSetting("sshUser", sshUser.trim());
-    if (typeof sshPort === "string") {
-      const p = sshPort.trim();
-      if (p && (!/^\d{1,5}$/.test(p) || parseInt(p, 10) < 1 || parseInt(p, 10) > 65535)) {
-        return res.status(400).json({ error: "SSH port must be a number between 1 and 65535." });
-      }
-      await storage.setSetting("sshPort", p);
-    }
+    if (sshPortRaw !== undefined) await storage.setSetting("sshPort", sshPortRaw);
     if (typeof sshKeyPath === "string") await storage.setSetting("sshKeyPath", sshKeyPath.trim());
     if (typeof serverGuiUrl === "string") await storage.setSetting("serverGuiUrl", serverGuiUrl.trim());
     res.json({ ok: true });
