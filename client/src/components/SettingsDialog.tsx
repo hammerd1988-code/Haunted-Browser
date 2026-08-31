@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -70,8 +70,11 @@ export function SettingsDialog({
 
   const isElectron = typeof window !== "undefined" && Boolean((window as any).casperElectron?.isElectron);
 
+  // Sync drafts from saved settings only when the dialog opens — never while
+  // it's open, or a background settings refetch would wipe in-progress edits.
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (open) {
+    if (open && !wasOpen.current) {
       setDraftEngine(engine);
       setDraftUrl(ollamaUrl);
       setDraftCustomUrl(customBaseUrl);
@@ -81,6 +84,7 @@ export function SettingsDialog({
       setSaveError("");
       setClearKey(false);
     }
+    wasOpen.current = open;
   }, [open, engine, ollamaUrl, customBaseUrl, model, apiKey, ssh]);
 
   // Switching engines resets engine-specific fields so a stale URL or model
