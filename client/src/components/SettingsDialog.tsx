@@ -82,6 +82,7 @@ export function SettingsDialog({
       if (!keep || wasOtherDefault) setDraftUrl(LOCAL_DEFAULT_URLS[next]);
     }
     setDraftModel("");
+    setDraftKey(next === engine ? apiKey : "");
     setDraftEngine(next);
   }
 

@@ -195,8 +195,8 @@ function fromAppUi(origin: unknown): boolean {
 }
 
 export async function registerRoutes(_httpServer: Server, app: Express): Promise<Server> {
-  app.use(["/api/settings", "/api/ssh", "/api/agent", "/api/chat"], (req, res, next) => {
-    if (req.method !== "GET" || req.path.startsWith("/api/settings")) {
+  app.use(["/api/settings", "/api/ssh", "/api/agent", "/api/chat", "/api/bookmarks", "/api/history"], (req, res, next) => {
+    if (req.method !== "GET" || req.originalUrl.startsWith("/api/settings")) {
       if (!fromAppUi(req.headers.origin)) {
         return res.status(403).json({ error: "forbidden" });
       }
@@ -559,7 +559,9 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 120_000);
-    req.on("close", () => ctrl.abort());
+    res.on("close", () => {
+      if (!res.writableEnded) ctrl.abort();
+    });
     try {
       const upstream = await fetch(`${probe.baseUrl}/chat/completions`, {
         method: "POST",
