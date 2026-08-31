@@ -16,6 +16,10 @@ declare module "http" {
 
 app.use(
   express.json({
+    // Agent conversations accumulate page/SSH observations across steps and
+    // can far exceed the 100kb default; the route-level message-count and
+    // per-message caps in /api/agent/step bound the real payload size.
+    limit: "4mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },

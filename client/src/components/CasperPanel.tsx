@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Send, X, Settings as SettingsIcon, Sparkles, BookOpen, Wrench, LifeBuoy, RefreshCw, ListChecks, FileText } from "lucide-react";
+import { Send, X, Settings as SettingsIcon, Sparkles, BookOpen, Wrench, LifeBuoy, RefreshCw, ListChecks, FileText, Bot, Square, Eye, Zap, FlaskConical } from "lucide-react";
 import type { ChatMessage, CasperStatus } from "@/lib/ghost";
 import { GhostMascot, cx } from "@/lib/ghost";
+import type { AutonomyMode, AgentAction } from "@/lib/agent";
 
 export function CasperPanel({
   status,
@@ -14,6 +15,13 @@ export function CasperPanel({
   onClose,
   onOpenSettings,
   onRefreshStatus,
+  agentMode,
+  onAgentModeChange,
+  agentRunning,
+  onRunAgent,
+  onStopAgent,
+  pendingApproval,
+  onApprove,
 }: {
   status: CasperStatus;
   messages: ChatMessage[];
@@ -24,8 +32,21 @@ export function CasperPanel({
   onClose: () => void;
   onOpenSettings: () => void;
   onRefreshStatus: () => void;
+  agentMode: AutonomyMode;
+  onAgentModeChange: (m: AutonomyMode) => void;
+  agentRunning: boolean;
+  onRunAgent: (goal: string) => void;
+  onStopAgent: () => void;
+  pendingApproval: AgentAction | null;
+  onApprove: (ok: boolean) => void;
 }) {
   const [input, setInput] = useState("");
+  const [agentOn, setAgentOn] = useState(false);
+  const busy = streaming || agentRunning;
+  const submit = (text: string) => {
+    if (agentOn) onRunAgent(text);
+    else onSend(text);
+  };
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -114,7 +135,7 @@ export function CasperPanel({
         {messages.map((m) => (
           <MessageBubble key={m.id} message={m} />
         ))}
-        {streaming && (
+        {(streaming || (agentRunning && !pendingApproval)) && (
           <div className="flex items-center gap-2 pl-1">
             <GhostMascot size={20} />
             <div className="flex items-center gap-1">
@@ -126,15 +147,98 @@ export function CasperPanel({
         )}
       </div>
 
+      {/* agent approval prompt */}
+      {pendingApproval && (
+        <div className="px-4 py-3 border-t border-border bg-primary/10 space-y-2" data-testid="agent-approval">
+          <p className="text-xs text-foreground/90">
+            <span className="font-semibold text-primary">Casper wants to:</span> {pendingApproval.describe}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="button-approve"
+              onClick={() => onApprove(true)}
+              className="h-7 px-3 rounded-full bg-primary text-primary-foreground text-xs font-medium hover:opacity-90"
+            >
+              Approve
+            </button>
+            <button
+              type="button"
+              data-testid="button-deny"
+              onClick={() => onApprove(false)}
+              className="h-7 px-3 rounded-full bg-accent/60 text-muted-foreground text-xs hover:text-foreground hover:bg-accent"
+            >
+              Deny
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* agent controls */}
+      <div className="px-3 py-2 border-t border-border flex items-center gap-2">
+        <button
+          type="button"
+          data-testid="button-agent-toggle"
+          onClick={() => setAgentOn((v) => !v)}
+          className={cx(
+            "flex items-center gap-1.5 h-7 px-2.5 rounded-full text-xs font-medium transition-colors",
+            agentOn ? "bg-primary/20 text-primary" : "bg-accent/60 text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <Bot className="w-3.5 h-3.5" />
+          Agent {agentOn ? "on" : "off"}
+        </button>
+        {agentOn && (
+          <div className="flex items-center gap-1">
+            {(
+              [
+                { mode: "supervised" as const, icon: Eye, label: "Supervised" },
+                { mode: "auto" as const, icon: Zap, label: "Auto" },
+                { mode: "dryrun" as const, icon: FlaskConical, label: "Dry run" },
+              ]
+            ).map((m) => (
+              <button
+                key={m.mode}
+                type="button"
+                data-testid={`button-mode-${m.mode}`}
+                title={m.label}
+                onClick={() => onAgentModeChange(m.mode)}
+                className={cx(
+                  "flex items-center gap-1 h-7 px-2 rounded-full text-[11px] transition-colors",
+                  agentMode === m.mode
+                    ? "bg-primary/15 text-primary"
+                    : "text-muted-foreground hover:text-foreground hover:bg-accent/60",
+                )}
+              >
+                <m.icon className="w-3 h-3" />
+                {m.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {agentRunning && (
+          <button
+            type="button"
+            data-testid="button-agent-stop"
+            onClick={onStopAgent}
+            className="ml-auto flex items-center gap-1 h-7 px-2.5 rounded-full text-xs bg-destructive/15 text-destructive hover:bg-destructive/25"
+          >
+            <Square className="w-3 h-3" />
+            Stop
+          </button>
+        )}
+      </div>
+
       {/* quick actions */}
       <div className="px-3 py-2 border-t border-border flex flex-wrap items-center gap-1.5 ghost-scroll">
         {quickActions.map((a) => (
           <button
             key={a.label}
             type="button"
+            disabled={busy}
             onClick={() => onSend(a.prompt, { injectPage: a.inject })}
             className={cx(
-              "shrink-0 flex items-center gap-1.5 h-8 px-2.5 rounded-full text-xs transition-colors",
+              "shrink-0 flex items-center gap-1.5 h-8 px-2.5 rounded-full text-xs transition-colors disabled:opacity-40 disabled:pointer-events-none",
               a.inject
                 ? "bg-primary/15 text-primary hover:bg-primary/25"
                 : "bg-accent/60 text-muted-foreground hover:text-foreground hover:bg-accent",
@@ -151,8 +255,8 @@ export function CasperPanel({
         className="p-3 border-t border-border"
         onSubmit={(e) => {
           e.preventDefault();
-          if (input.trim() && !streaming) {
-            onSend(input.trim());
+          if (input.trim() && !busy) {
+            submit(input.trim());
             setInput("");
           }
         }}
@@ -161,13 +265,13 @@ export function CasperPanel({
           <textarea
             value={input}
             data-testid="input-casper"
-            placeholder="Ask Casper…"
+            placeholder={agentOn ? "Give Casper a browsing goal…" : "Ask Casper…"}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                if (input.trim() && !streaming) {
-                  onSend(input.trim());
+                if (input.trim() && !busy) {
+                  submit(input.trim());
                   setInput("");
                 }
               }
@@ -178,7 +282,7 @@ export function CasperPanel({
           <button
             type="submit"
             aria-label="Send"
-            disabled={!input.trim() || streaming}
+            disabled={!input.trim() || busy}
             className="shrink-0 w-9 h-9 rounded-xl bg-primary text-primary-foreground flex items-center justify-center disabled:opacity-40 hover:opacity-90 transition-opacity"
           >
             <Send className="w-4 h-4" />
@@ -205,8 +309,26 @@ function StatusBadge({ status }: { status: CasperStatus }) {
   );
 }
 
+const KIND_STYLES: Record<string, { label: string; cls: string }> = {
+  thought: { label: "thinking", cls: "text-muted-foreground italic" },
+  action: { label: "action", cls: "text-primary" },
+  observation: { label: "observed", cls: "text-muted-foreground" },
+  blocked: { label: "blocked", cls: "text-amber-500" },
+};
+
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
+  if (!isUser && message.kind && KIND_STYLES[message.kind]) {
+    const k = KIND_STYLES[message.kind];
+    return (
+      <div className="flex gap-2.5 pl-7" data-testid={`agent-step-${message.kind}`}>
+        <div className={cx("max-w-[90%] text-xs leading-relaxed border-l-2 border-border pl-2.5", k.cls)}>
+          <span className="block text-[10px] uppercase tracking-wide opacity-70">{k.label}</span>
+          <span className="whitespace-pre-wrap break-words">{message.content.length > 600 ? message.content.slice(0, 600) + "…" : message.content}</span>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={cx("flex gap-2.5", isUser ? "flex-row-reverse" : "flex-row")}>
       {!isUser && <GhostMascot size={22} className="mt-0.5 shrink-0" />}

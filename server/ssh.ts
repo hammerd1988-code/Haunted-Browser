@@ -1,0 +1,108 @@
+/**
+ * Casper's SSH bridge to the user's server nodes. Commands run through the
+ * system OpenSSH client in BatchMode (key auth only — never interactive
+ * password prompts), with hard timeouts and capped output. The HTTP endpoints
+ * that call this are loopback-only (see server/index.ts).
+ */
+import { spawn } from "node:child_process";
+
+export interface SshConfig {
+  host: string;
+  user: string;
+  port: number;
+  keyPath: string;
+}
+
+export interface SshResult {
+  ok: boolean;
+  output: string;
+  error?: string;
+}
+
+const MAX_OUTPUT = 20_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+// Values that reach the ssh argv must never start with "-", or OpenSSH would
+// parse them as options (e.g. a host of "-oProxyCommand=..." runs a local
+// command). Ports must be numeric.
+export function validSshConfig(cfg: SshConfig): string | null {
+  if (cfg.host.startsWith("-")) return "Invalid SSH host.";
+  if (cfg.user.startsWith("-") || cfg.user.includes("@")) return "Invalid SSH user.";
+  if (cfg.keyPath.startsWith("-")) return "Invalid SSH key path.";
+  if (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535) return "Invalid SSH port.";
+  return null;
+}
+
+export function sshArgs(cfg: SshConfig, command: string): string[] {
+  const args = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=8",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-p", String(cfg.port || 22),
+  ];
+  if (cfg.keyPath) args.push("-i", cfg.keyPath);
+  args.push("--", `${cfg.user}@${cfg.host}`, command);
+  return args;
+}
+
+export function runSsh(
+  cfg: SshConfig,
+  command: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<SshResult> {
+  return new Promise((resolve) => {
+    if (!cfg.host || !cfg.user) {
+      return resolve({ ok: false, output: "", error: "No server node configured — set host and user in Casper Settings." });
+    }
+    const invalid = validSshConfig(cfg);
+    if (invalid) {
+      return resolve({ ok: false, output: "", error: `${invalid} Check the server node fields in Casper Settings.` });
+    }
+    const child = spawn("ssh", sshArgs(cfg, command), { windowsHide: true });
+    let out = "";
+    let err = "";
+    let settled = false;
+    const finish = (result: SshResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const onAbort = () => {
+      child.kill();
+      finish({ ok: false, output: out.slice(0, MAX_OUTPUT), error: "Cancelled." });
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ ok: false, output: out.slice(0, MAX_OUTPUT), error: `Command timed out after ${Math.round(timeoutMs / 1000)}s.` });
+    }, timeoutMs);
+    if (signal) {
+      if (signal.aborted) return onAbort();
+      signal.addEventListener("abort", onAbort);
+    }
+    child.stdout.on("data", (d) => { if (out.length < MAX_OUTPUT) out += String(d); });
+    child.stderr.on("data", (d) => { if (err.length < MAX_OUTPUT) err += String(d); });
+    child.on("error", (e) => {
+      finish({ ok: false, output: "", error: `Could not run ssh: ${e.message}. Is OpenSSH installed?` });
+    });
+    child.on("close", (code) => {
+      if (code === 0) {
+        finish({ ok: true, output: out.slice(0, MAX_OUTPUT) });
+      } else {
+        finish({
+          ok: false,
+          output: out.slice(0, MAX_OUTPUT),
+          error: err.trim().slice(0, 2000) || `ssh exited with code ${code}`,
+        });
+      }
+    });
+  });
+}
+
+/** One-call health snapshot used by the serverStatus agent tool. */
+export const STATUS_COMMAND =
+  "echo '--- host ---'; hostname; uname -a; echo '--- uptime ---'; uptime; " +
+  "echo '--- disk ---'; df -h / 2>/dev/null; echo '--- memory ---'; free -m 2>/dev/null; " +
+  "echo '--- load/services ---'; systemctl list-units --state=failed --no-pager 2>/dev/null | head -20";

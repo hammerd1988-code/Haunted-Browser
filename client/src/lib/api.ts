@@ -40,13 +40,71 @@ export async function clearHistory() {
   await apiRequest("DELETE", "/api/history");
 }
 
-export async function fetchSettings(): Promise<{ ollamaUrl: string; model: string; apiKey: string }> {
+export interface EngineSettings {
+  engine: "lmstudio" | "ollama" | "openai" | "openrouter" | "custom";
+  ollamaUrl: string;
+  customBaseUrl: string;
+  model: string;
+  /** Always empty in responses — the server never echoes the saved key. */
+  apiKey: string;
+  hasApiKey?: boolean;
+  sshHost: string;
+  sshUser: string;
+  sshPort: string;
+  sshKeyPath: string;
+  serverGuiUrl: string;
+}
+
+export async function fetchSettings(): Promise<EngineSettings> {
   const res = await apiRequest("GET", "/api/settings");
   return res.json();
 }
 
-export async function saveSettings(body: { ollamaUrl: string; model: string; apiKey?: string }) {
+export async function saveSettings(
+  body: Partial<Omit<EngineSettings, "apiKey">> & { apiKey?: string | null },
+) {
   await apiRequest("POST", "/api/settings", body);
+}
+
+export interface EngineDraft {
+  engine: EngineSettings["engine"];
+  ollamaUrl: string;
+  customBaseUrl: string;
+  apiKey: string;
+  discover?: boolean;
+}
+
+export async function testEngineSettings(draft: EngineDraft): Promise<CasperStatus> {
+  const res = await apiRequest("POST", "/api/status/test", draft);
+  return res.json();
+}
+
+export async function agentStep(
+  messages: { role: string; content: string }[],
+  model: string,
+  signal?: AbortSignal,
+): Promise<{ content?: string; error?: string; hint?: string; demo?: boolean }> {
+  const res = await fetch(`${API_BASE}/api/agent/step`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, model }),
+    signal,
+  });
+  if (!res.ok) return { error: `Agent request failed (${res.status})` };
+  return res.json();
+}
+
+export async function sshRun(
+  command: string,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; output: string; error?: string }> {
+  const res = await fetch(`${API_BASE}/api/ssh/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command }),
+    signal,
+  });
+  return res.json();
 }
 
 export async function probeUrl(url: string): Promise<{ embeddable: boolean; reason?: string; finalUrl?: string }> {

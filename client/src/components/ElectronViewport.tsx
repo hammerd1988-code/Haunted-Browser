@@ -27,6 +27,7 @@ export function ElectronViewport({
   findOpen,
   onFindClose,
   onTabMeta,
+  onExecutor,
 }: {
   url: string;
   bookmarks: Bookmark[];
@@ -39,6 +40,8 @@ export function ElectronViewport({
   findOpen?: boolean;
   onFindClose?: () => void;
   onTabMeta?: (meta: TabMeta) => void;
+  /** Hands the parent a fixed-script page executor (null when no live page). */
+  onExecutor?: (fn: ((code: string) => Promise<unknown>) | null) => void;
 }) {
   const wvRef = useRef<any>(null);
   const lastReportedUrl = useRef<string>("");
@@ -182,6 +185,37 @@ export function ElectronViewport({
         /* webview not ready yet */
       }
     }
+  }, [url]);
+
+  // Expose a controlled page-script executor to the parent (Casper's agent
+  // toolbelt). Only fixed app-generated scripts are ever passed in.
+  useEffect(() => {
+    if (!onExecutor) return;
+    if (url === NEWTAB) {
+      onExecutor(null);
+      return;
+    }
+    onExecutor((code: string) => {
+      const wv = wvRef.current;
+      if (!wv || typeof wv.executeJavaScript !== "function") {
+        return Promise.reject(new Error("page not ready"));
+      }
+      // The webview can still be showing the previous document while a
+      // navigation is committing; only run scripts once the committed URL
+      // matches the tab's URL so an action never hits the wrong page.
+      try {
+        const current = typeof wv.getURL === "function" ? wv.getURL() : "";
+        const same = current && (current === url || current.split("#")[0] === url.split("#")[0]);
+        if (!same || (typeof wv.isLoading === "function" && wv.isLoading())) {
+          return Promise.reject(new Error("page is still loading — readPage or retry once it settles"));
+        }
+      } catch {
+        return Promise.reject(new Error("page not ready"));
+      }
+      return wv.executeJavaScript(code);
+    });
+    return () => onExecutor(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
 
   // Apply zoom when the per-tab zoomFactor prop changes.

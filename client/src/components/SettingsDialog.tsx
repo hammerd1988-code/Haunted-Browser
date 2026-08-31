@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -6,41 +6,101 @@ import { Label } from "@/components/ui/label";
 import { Check, AlertTriangle, Loader2, Ghost, Download, RefreshCw } from "lucide-react";
 import type { CasperStatus } from "@/lib/ghost";
 import { GhostMascot } from "@/lib/ghost";
+import type { EngineDraft, EngineSettings } from "@/lib/api";
+
+export type EngineSettingsPayload = Partial<Omit<EngineSettings, "apiKey">> & {
+  apiKey?: string | null;
+};
+
+type EngineType = EngineSettings["engine"];
+
+const ENGINE_OPTIONS: { value: EngineType; label: string }[] = [
+  { value: "lmstudio", label: "Local — LM Studio" },
+  { value: "ollama", label: "Local — Ollama" },
+  { value: "openai", label: "Cloud — OpenAI" },
+  { value: "openrouter", label: "Cloud — OpenRouter" },
+  { value: "custom", label: "Custom — OpenAI-compatible URL" },
+];
+
+const isLocal = (e: EngineType) => e === "lmstudio" || e === "ollama";
+
+const LOCAL_DEFAULT_URLS: Record<string, string> = {
+  lmstudio: "http://127.0.0.1:1234",
+  ollama: "http://127.0.0.1:11434",
+};
 
 export function SettingsDialog({
   open,
   onOpenChange,
   status,
+  engine,
   ollamaUrl,
+  customBaseUrl,
   model,
   apiKey,
+  hasApiKey,
+  ssh,
   onSave,
   onTest,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   status: CasperStatus;
+  engine: EngineType;
   ollamaUrl: string;
+  customBaseUrl: string;
   model: string;
   apiKey: string;
-  onSave: (ollamaUrl: string, model: string, apiKey: string) => void;
-  onTest: (url: string, opts?: { discover?: boolean }) => Promise<CasperStatus | void> | void;
+  hasApiKey: boolean;
+  ssh: { sshHost: string; sshUser: string; sshPort: string; sshKeyPath: string; serverGuiUrl: string };
+  onSave: (settings: EngineSettingsPayload) => Promise<void> | void;
+  onTest: (draft: EngineDraft) => Promise<CasperStatus | void> | void;
 }) {
+  const [draftEngine, setDraftEngine] = useState<EngineType>(engine);
   const [draftUrl, setDraftUrl] = useState(ollamaUrl);
+  const [draftCustomUrl, setDraftCustomUrl] = useState(customBaseUrl);
   const [draftModel, setDraftModel] = useState(model);
   const [draftKey, setDraftKey] = useState(apiKey);
+  const [draftSsh, setDraftSsh] = useState(ssh);
   const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [clearKey, setClearKey] = useState(false);
   const [update, setUpdate] = useState<{ type: string; version?: string; message?: string; percent?: number } | null>(null);
 
   const isElectron = typeof window !== "undefined" && Boolean((window as any).casperElectron?.isElectron);
 
+  // Sync drafts from saved settings only when the dialog opens — never while
+  // it's open, or a background settings refetch would wipe in-progress edits.
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (open) {
+    if (open && !wasOpen.current) {
+      setDraftEngine(engine);
       setDraftUrl(ollamaUrl);
+      setDraftCustomUrl(customBaseUrl);
       setDraftModel(model);
       setDraftKey(apiKey);
+      setDraftSsh(ssh);
+      setSaveError("");
+      setClearKey(false);
     }
-  }, [open, ollamaUrl, model, apiKey]);
+    wasOpen.current = open;
+  }, [open, engine, ollamaUrl, customBaseUrl, model, apiKey, ssh]);
+
+  // Switching engines resets engine-specific fields so a stale URL or model
+  // from a different engine is never silently carried over.
+  function changeEngine(next: EngineType) {
+    if (next === draftEngine) return;
+    if (isLocal(next)) {
+      const keep = draftEngine !== "lmstudio" && draftEngine !== "ollama" ? "" : draftUrl;
+      const wasOtherDefault = Object.values(LOCAL_DEFAULT_URLS).includes(keep);
+      if (!keep || wasOtherDefault) setDraftUrl(LOCAL_DEFAULT_URLS[next]);
+    }
+    setDraftModel("");
+    setDraftKey("");
+    setClearKey(false);
+    setDraftEngine(next);
+  }
 
   useEffect(() => {
     const bridge = (window as any).casperElectron;
@@ -49,48 +109,121 @@ export function SettingsDialog({
     return () => off && off();
   }, []);
 
-  const models = status.models;
+  // Only trust the probed model list when it came from the engine being
+  // edited — after testing another engine, status.models belongs to it.
+  const statusEngine = status.engine || engine;
+  const models = statusEngine === draftEngine ? status.models : [];
 
   async function runTest(discover = false) {
     setTesting(true);
     try {
-      const result = await onTest(draftUrl, { discover });
-      if (result?.origin) setDraftUrl(result.origin);
+      const result = await onTest({
+        engine: draftEngine,
+        ollamaUrl: draftUrl,
+        customBaseUrl: draftCustomUrl,
+        apiKey: draftKey,
+        discover,
+      });
+      if (result?.origin && isLocal(draftEngine)) setDraftUrl(result.origin);
       if (result?.models?.length && !draftModel) setDraftModel(result.models[0]);
     } finally {
       setTesting(false);
     }
   }
 
+  async function handleSave() {
+    setSaving(true);
+    setSaveError("");
+    try {
+      await onSave({
+        engine: draftEngine,
+        ollamaUrl: draftUrl,
+        customBaseUrl: draftCustomUrl,
+        model: draftModel || models[0] || "",
+        // Empty means "keep the saved key"; null clears it — sent when the
+        // engine changed or the user explicitly cleared the key.
+        apiKey: draftKey || (draftEngine !== engine || clearKey ? null : ""),
+        ...draftSsh,
+      });
+      onOpenChange(false);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Could not save settings.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="glass-strong border-border max-w-md">
+      <DialogContent className="glass-strong border-border max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
             <GhostMascot size={28} glow />
             <div>
               <DialogTitle className="font-[family-name:var(--font-display)]">Casper Settings</DialogTitle>
-              <DialogDescription>Connect your local model server</DialogDescription>
+              <DialogDescription>Dealer's choice — pick Casper's brain</DialogDescription>
             </div>
           </div>
         </DialogHeader>
 
         <div className="space-y-5 py-2">
           <div className="space-y-2">
-            <Label htmlFor="ollama-url">Model server URL</Label>
-            <Input
-              id="ollama-url"
-              data-testid="input-ollama-url"
-              value={draftUrl}
-              onChange={(e) => setDraftUrl(e.target.value)}
-              placeholder="http://127.0.0.1:1234"
-            />
+            <Label htmlFor="engine">Engine</Label>
+            <select
+              id="engine"
+              data-testid="select-engine"
+              value={draftEngine}
+              onChange={(e) => changeEngine(e.target.value as EngineType)}
+              className="flex h-10 w-full rounded-md border border-input bg-background/70 px-3 text-sm outline-none focus:border-primary/60"
+            >
+              {ENGINE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
             <p className="text-xs text-muted-foreground">
-              LM Studio: open the <strong>Developer</strong> tab, start the local server, and load a
-              chat model. Default is <code className="font-mono">http://127.0.0.1:1234</code>. Ollama
-              uses <code className="font-mono">http://127.0.0.1:11434</code>.
+              Casper works the same on every engine — local models keep everything private, cloud
+              models bring more horsepower.
             </p>
           </div>
+
+          {isLocal(draftEngine) && (
+            <div className="space-y-2">
+              <Label htmlFor="ollama-url">Local server URL</Label>
+              <Input
+                id="ollama-url"
+                data-testid="input-ollama-url"
+                value={draftUrl}
+                onChange={(e) => setDraftUrl(e.target.value)}
+                placeholder={draftEngine === "ollama" ? "http://127.0.0.1:11434" : "http://127.0.0.1:1234"}
+              />
+              <p className="text-xs text-muted-foreground">
+                {draftEngine === "ollama" ? (
+                  <>Ollama serves on <code className="font-mono">http://127.0.0.1:11434</code> by default.</>
+                ) : (
+                  <>LM Studio: open the <strong>Developer</strong> tab, start the local server, and load a
+                  chat model. Default is <code className="font-mono">http://127.0.0.1:1234</code>.</>
+                )}
+              </p>
+            </div>
+          )}
+
+          {draftEngine === "custom" && (
+            <div className="space-y-2">
+              <Label htmlFor="custom-url">OpenAI-compatible base URL</Label>
+              <Input
+                id="custom-url"
+                data-testid="input-custom-url"
+                value={draftCustomUrl}
+                onChange={(e) => setDraftCustomUrl(e.target.value)}
+                placeholder="https://my-proxy.example.com/v1"
+              />
+              <p className="text-xs text-muted-foreground">
+                Any server that speaks the OpenAI chat-completions API.
+              </p>
+            </div>
+          )}
 
           <div className="space-y-2">
             <Label>Connection</Label>
@@ -166,24 +299,94 @@ export function SettingsDialog({
               />
             )}
             <p className="text-xs text-muted-foreground">
-              Pick a model from your LM Studio / Ollama server, or type a name. The loaded model is used
-              automatically.
+              {isLocal(draftEngine)
+                ? "Pick a model from your local server, or type a name. The loaded model is used automatically."
+                : draftEngine === "openrouter"
+                  ? "e.g. openai/gpt-4o-mini, anthropic/claude-3.5-sonnet"
+                  : "e.g. gpt-4o-mini, gpt-4o"}
             </p>
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="api-key">API token (optional)</Label>
+            <Label htmlFor="api-key">{isLocal(draftEngine) ? "API token (optional)" : "API key"}</Label>
             <Input
               id="api-key"
               data-testid="input-api-key"
               type="password"
               autoComplete="off"
               value={draftKey}
-              onChange={(e) => setDraftKey(e.target.value)}
-              placeholder="Only if LM Studio requires authentication"
+              onChange={(e) => {
+                setDraftKey(e.target.value);
+                if (e.target.value) setClearKey(false);
+              }}
+              placeholder={
+                hasApiKey && draftEngine === engine && !clearKey
+                  ? "Saved — leave blank to keep"
+                  : isLocal(draftEngine)
+                    ? "Only if your local server requires authentication"
+                    : "sk-..."
+              }
+            />
+            {hasApiKey && draftEngine === engine && !draftKey && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-testid="button-clear-key"
+                className={clearKey ? "text-amber-500" : ""}
+                onClick={() => setClearKey((v) => !v)}
+              >
+                {clearKey ? "Key will be removed on save — undo" : "Remove saved key"}
+              </Button>
+            )}
+            <p className="text-xs text-muted-foreground">
+              {isLocal(draftEngine)
+                ? "Leave blank unless your local server requires an API token."
+                : "Stored locally in Haunted Browser's settings — never sent anywhere except the engine you chose."}
+            </p>
+          </div>
+
+          <div className="space-y-2" data-testid="server-node-section">
+            <Label>Server node (SSH)</Label>
+            <p className="text-xs text-muted-foreground">
+              Give Casper a server to look after — it can monitor health, manage services, and run
+              maintenance over SSH (key auth only, never passwords).
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <Input
+                data-testid="input-ssh-host"
+                value={draftSsh.sshHost}
+                onChange={(e) => setDraftSsh((s) => ({ ...s, sshHost: e.target.value }))}
+                placeholder="Host (e.g. 203.0.113.7)"
+              />
+              <Input
+                data-testid="input-ssh-user"
+                value={draftSsh.sshUser}
+                onChange={(e) => setDraftSsh((s) => ({ ...s, sshUser: e.target.value }))}
+                placeholder="User (e.g. ubuntu)"
+              />
+              <Input
+                data-testid="input-ssh-port"
+                value={draftSsh.sshPort}
+                onChange={(e) => setDraftSsh((s) => ({ ...s, sshPort: e.target.value }))}
+                placeholder="Port (22)"
+              />
+              <Input
+                data-testid="input-ssh-key"
+                value={draftSsh.sshKeyPath}
+                onChange={(e) => setDraftSsh((s) => ({ ...s, sshKeyPath: e.target.value }))}
+                placeholder="Private key path (optional)"
+              />
+            </div>
+            <Input
+              data-testid="input-server-gui-url"
+              value={draftSsh.serverGuiUrl}
+              onChange={(e) => setDraftSsh((s) => ({ ...s, serverGuiUrl: e.target.value }))}
+              placeholder="Server dashboard URL (Local Coder / NEO//OPS Ubuntu GUI)"
             />
             <p className="text-xs text-muted-foreground">
-              Leave blank unless you enabled an API token in LM Studio → Developer → server settings.
+              The dashboard URL lets Casper open your Ubuntu server GUI in a tab for visual
+              monitoring alongside SSH.
             </p>
           </div>
 
@@ -253,19 +456,22 @@ export function SettingsDialog({
           )}
         </div>
 
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            onClick={() => {
-              onSave(draftUrl, draftModel || models[0] || "", draftKey);
-              onOpenChange(false);
-            }}
-          >
-            <Ghost className="w-4 h-4 mr-1" />
-            Save & haunt
-          </Button>
+        <DialogFooter className="flex-col gap-2 sm:flex-col">
+          {saveError && (
+            <p className="text-xs text-amber-500 w-full" data-testid="text-save-error">
+              <AlertTriangle className="w-3.5 h-3.5 inline mr-1" />
+              {saveError}
+            </p>
+          )}
+          <div className="flex justify-end gap-2 w-full">
+            <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Ghost className="w-4 h-4 mr-1" />}
+              Save & haunt
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

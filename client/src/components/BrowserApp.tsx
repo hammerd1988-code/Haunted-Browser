@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { TabBar } from "./TabBar";
 import { Toolbar } from "./Toolbar";
@@ -16,9 +16,15 @@ import {
   fetchSettings,
   saveSettings,
   streamChat,
+  agentStep,
+  sshRun,
+  testEngineSettings,
+  type EngineDraft,
 } from "@/lib/api";
+import type { EngineSettingsPayload } from "./SettingsDialog";
 import type { Tab, ChatMessage, CasperStatus } from "@/lib/ghost";
 import { uid, resolveAddress, hostOf, clampZoom, ZOOM_STEP } from "@/lib/ghost";
+import { runAgent, type AutonomyMode, type AgentToolbelt, type AgentAction } from "@/lib/agent";
 
 const NEWTAB = "about:newtab";
 
@@ -47,6 +53,12 @@ export function BrowserApp() {
   const abortRef = useRef<AbortController | null>(null);
   const pageContextRef = useRef<PageContext | null>(null);
   const [hasPageContext, setHasPageContext] = useState(false);
+  const [agentMode, setAgentMode] = useState<AutonomyMode>("supervised");
+  const [agentRunning, setAgentRunning] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState<AgentAction | null>(null);
+  const approvalRef = useRef<((ok: boolean) => void) | null>(null);
+  const agentAbortRef = useRef<AbortController | null>(null);
+  const pageExecutorRef = useRef<((code: string) => Promise<unknown>) | null>(null);
   const isElectron = typeof window !== "undefined" && Boolean((window as any).casperElectron?.isElectron);
 
   const bookmarksQuery = useQuery({ queryKey: ["/api/bookmarks"], queryFn: fetchBookmarks });
@@ -57,6 +69,17 @@ export function BrowserApp() {
   const currentUrl = activeTab.url;
   const isBookmarked = bookmarks.some((b) => b.url === currentUrl);
   const model = settingsQuery.data?.model || status.models[0] || "";
+
+  const sshSettings = useMemo(
+    () => ({
+      sshHost: settingsQuery.data?.sshHost ?? "",
+      sshUser: settingsQuery.data?.sshUser ?? "",
+      sshPort: settingsQuery.data?.sshPort ?? "22",
+      sshKeyPath: settingsQuery.data?.sshKeyPath ?? "",
+      serverGuiUrl: settingsQuery.data?.serverGuiUrl ?? "",
+    }),
+    [settingsQuery.data],
+  );
 
   // Backstop clear: whenever the active tab or its URL changes (including to
   // New Tab, where the webview is unmounted and no navigation clear fires),
@@ -143,8 +166,9 @@ export function BrowserApp() {
           setActiveId(fresh.id);
           return [fresh];
         }
-        const newActive = prev[idx + 1] ?? prev[idx - 1];
-        setActiveId(newActive.id);
+        // Only move focus when the closed tab was the active one; closing a
+        // background tab must not steal focus from the page being viewed.
+        setActiveId((cur) => (cur === id ? (prev[idx + 1] ?? prev[idx - 1]).id : cur));
         return next;
       });
     },
@@ -336,7 +360,10 @@ export function BrowserApp() {
         finalText = `${text}\n\n(Note: I can't read the active page's text here. In the Casper desktop app I read the page you're viewing directly — install it to use this with live pages.)`;
       }
       const userMsgFinal = { ...userMsg, content: finalText };
-      const apiMessages = [...messages, ...contextMessages, userMsgFinal];
+      // Agent-run traces (thoughts/actions/observations) stay visible in the
+      // panel but are internal — keep them out of the chat context sent upstream.
+      const chatHistory = messages.filter((m) => !m.kind);
+      const apiMessages = [...chatHistory, ...contextMessages, userMsgFinal];
       setMessages((prev) => [...prev, userMsg, { id: asstId, role: "assistant", content: "", pending: true }]);
       setStreaming(true);
 
@@ -365,6 +392,119 @@ export function BrowserApp() {
     },
     [messages, model, streaming, currentUrl],
   );
+
+  // ---- casper agent mode ----
+  // Latest-value refs so the agent toolbelt always sees current tab state even
+  // as the run mutates it (open/close/switch happen mid-run).
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+
+  const PAGE_SNAPSHOT = `(function(){var t='';try{t=(document.body&&document.body.innerText)||'';}catch(e){}return {url:location.href,title:document.title||'',text:t.slice(0,30000)};})()`;
+
+  const runAgentGoal = useCallback(
+    async (goal: string) => {
+      if (agentRunning || streaming) return;
+      setMessages((prev) => [...prev, { id: uid(), role: "user", content: goal }]);
+      setAgentRunning(true);
+      const ctrl = new AbortController();
+      agentAbortRef.current = ctrl;
+
+      const toolbelt: AgentToolbelt = {
+        listTabs: () =>
+          tabsRef.current.map((t, i) => ({
+            index: i,
+            title: t.title,
+            url: t.url,
+            active: t.id === activeIdRef.current,
+          })),
+        openTab: (url: string) => {
+          const t = makeTab(resolveAddress(url));
+          setTabs((prev) => [...prev, t]);
+          setActiveId(t.id);
+          addHistory({ title: hostOf(t.url), url: t.url }).catch(() => {});
+        },
+        closeTab: (index: number) => {
+          const t = tabsRef.current[index];
+          if (!t) return `ERROR: no tab at index ${index}.`;
+          closeTab(t.id);
+        },
+        switchTab: (index: number) => {
+          const t = tabsRef.current[index];
+          if (!t) return `ERROR: no tab at index ${index}.`;
+          setActiveId(t.id);
+        },
+        navigate: (url: string) => navigateRef.current(url),
+        readPage: async () => {
+          const exec = pageExecutorRef.current;
+          if (!exec) return { error: "no live page (New Tab or web preview) — navigate somewhere first." };
+          try {
+            const r = (await exec(PAGE_SNAPSHOT)) as { url?: string; title?: string; text?: string };
+            return { url: r?.url || "", title: r?.title || "", text: r?.text || "" };
+          } catch (err) {
+            return { error: err instanceof Error ? err.message : String(err) };
+          }
+        },
+        get executeInPage() {
+          return pageExecutorRef.current;
+        },
+        sshRun: (command: string) => sshRun(command, ctrl.signal),
+        serverGuiUrl: settingsQuery.data?.serverGuiUrl || "",
+      };
+
+      try {
+        await runAgent({
+          goal,
+          mode: agentMode,
+          toolbelt,
+          signal: ctrl.signal,
+          callAgentStep: (msgs) => agentStep(msgs, model, ctrl.signal),
+          requestApproval: (action) =>
+            new Promise<boolean>((resolve) => {
+              setPendingApproval(action);
+              approvalRef.current = (ok: boolean) => {
+                setPendingApproval(null);
+                approvalRef.current = null;
+                resolve(ok);
+              };
+            }),
+          onEvent: (e) => {
+            if (e.type === "final") {
+              setMessages((prev) => [...prev, { id: uid(), role: "assistant", content: e.text }]);
+            } else {
+              const kind =
+                e.type === "thought"
+                  ? "thought"
+                  : e.type === "action"
+                    ? "action"
+                    : e.type === "blocked" || e.type === "error"
+                      ? "blocked"
+                      : "observation";
+              setMessages((prev) => [...prev, { id: uid(), role: "assistant", content: e.text, kind }]);
+            }
+          },
+        });
+      } finally {
+        setAgentRunning(false);
+        setPendingApproval(null);
+        approvalRef.current = null;
+        agentAbortRef.current = null;
+      }
+    },
+    [agentRunning, streaming, agentMode, model, closeTab, settingsQuery.data?.serverGuiUrl],
+  );
+
+  const resolveApproval = useCallback((ok: boolean) => {
+    approvalRef.current?.(ok);
+  }, []);
+
+  const stopAgent = useCallback(() => {
+    agentAbortRef.current?.abort();
+    approvalRef.current?.(false);
+  }, []);
 
   const askCasper = useCallback(
     (prompt: string) => {
@@ -400,19 +540,21 @@ export function BrowserApp() {
   const openBookmark = useCallback((url: string) => navigate(url), [navigate]);
 
   const handleSaveSettings = useCallback(
-    async (ollamaUrl: string, mdl: string, apiKey: string) => {
-      await saveSettings({ ollamaUrl, model: mdl, apiKey });
+    async (settings: EngineSettingsPayload) => {
+      await saveSettings(settings);
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
-      await refreshStatus(ollamaUrl);
+      await refreshStatus();
     },
     [queryClient, refreshStatus],
   );
 
   const testConnection = useCallback(
-    async (url: string, opts?: { discover?: boolean }) => {
-      return refreshStatus(url, opts);
+    async (draft: EngineDraft) => {
+      const s = await testEngineSettings(draft).catch((): CasperStatus => ({ connected: false, baseUrl: "", models: [], demo: true }));
+      setStatus(s);
+      return s;
     },
-    [refreshStatus],
+    [],
   );
 
   return (
@@ -465,6 +607,9 @@ export function BrowserApp() {
                 setHasPageContext(true);
               }}
               onTabMeta={(meta) => updateTabMeta(activeId, meta)}
+              onExecutor={(fn) => {
+                pageExecutorRef.current = fn;
+              }}
             />
           ) : (
             <BrowserViewport
@@ -489,6 +634,13 @@ export function BrowserApp() {
               onClose={() => setCasperOpen(false)}
               onOpenSettings={() => setSettingsOpen(true)}
               onRefreshStatus={() => refreshStatus()}
+              agentMode={agentMode}
+              onAgentModeChange={setAgentMode}
+              agentRunning={agentRunning}
+              onRunAgent={runAgentGoal}
+              onStopAgent={stopAgent}
+              pendingApproval={pendingApproval}
+              onApprove={resolveApproval}
             />
           </div>
         )}
@@ -498,9 +650,13 @@ export function BrowserApp() {
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         status={status}
+        engine={settingsQuery.data?.engine ?? "lmstudio"}
         ollamaUrl={settingsQuery.data?.ollamaUrl ?? "http://127.0.0.1:1234"}
+        customBaseUrl={settingsQuery.data?.customBaseUrl ?? ""}
         model={model}
         apiKey={settingsQuery.data?.apiKey ?? ""}
+        hasApiKey={Boolean(settingsQuery.data?.hasApiKey)}
+        ssh={sshSettings}
         onSave={handleSaveSettings}
         onTest={testConnection}
       />

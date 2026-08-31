@@ -20,7 +20,7 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "test": "tsx --test server/model-server.test.ts",
+    "test": "tsx --test server/model-server.test.ts client/src/lib/agent.test.ts",
     "db:push": "drizzle-kit push",
     "electron": "electron .",
     "electron:dev": "concurrently -k -n server,app -c green,cyan \"npm:dev\" \"wait-on -t 45000 http://127.0.0.1:5000/api/health && electron .\"",
