@@ -7,6 +7,7 @@ import {
   openaiBaseFromOrigin,
   parseModelIds,
   probeModelServer,
+  probeRemoteServer,
   stripToOrigin,
   withLoopback,
 } from "./model-server";
@@ -155,6 +156,21 @@ describe("probeModelServer", () => {
       const result = await probeModelServer({ url: "http://127.0.0.1:1234" });
       assert.equal(result.connected, false);
       assert.match(result.error || "", /API token/i);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
+describe("probeRemoteServer", () => {
+  it("treats unsupported /models endpoints as connected for remote engines", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("missing", { status: 404 })) as typeof fetch;
+    try {
+      const result = await probeRemoteServer({ baseUrl: "https://api.example.com/v1", apiKey: "test-key" });
+      assert.equal(result.connected, true);
+      assert.equal(result.demo, false);
+      assert.deepEqual(result.models, []);
     } finally {
       globalThis.fetch = original;
     }

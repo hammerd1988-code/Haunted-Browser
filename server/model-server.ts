@@ -145,7 +145,7 @@ export async function fetchModels(
     if (res.status === 401 || res.status === 403) {
       throw Object.assign(new Error(`HTTP ${res.status} unauthorized`), { status: res.status });
     }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
     return parseModelIds(await res.json());
   } finally {
     clearTimeout(t);

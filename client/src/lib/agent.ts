@@ -144,8 +144,21 @@ interface ParsedToolCall {
   args: Record<string, unknown>;
 }
 
+function splitToolCallContent(content: string): { thought: string; toolLine: string } | null {
+  const lines = content.split(/\r?\n/);
+  let last = lines.length - 1;
+  while (last >= 0 && !lines[last]?.trim()) last--;
+  if (last < 0) return null;
+  return {
+    thought: lines.slice(0, last).join("\n").trim(),
+    toolLine: lines[last].trim(),
+  };
+}
+
 export function parseToolCall(content: string): ParsedToolCall | null {
-  const m = content.match(/^\s*TOOL:\s*([a-zA-Z]+)\s*(\{[\s\S]*\})?\s*$/m);
+  const parts = splitToolCallContent(content);
+  if (!parts) return null;
+  const m = parts.toolLine.match(/^TOOL:\s*([a-zA-Z]+)\s*(\{.*\})?\s*$/);
   if (!m) return null;
   const tool = m[1];
   let args: Record<string, unknown> = {};
@@ -162,7 +175,7 @@ export function parseToolCall(content: string): ParsedToolCall | null {
 
 /** The model's commentary around a TOOL: line, shown as its "thought". */
 function thoughtAround(content: string): string {
-  return content.replace(/^\s*TOOL:.*$/m, "").trim();
+  return splitToolCallContent(content)?.thought || "";
 }
 
 /* ------------------------------------------------------------------ */
