@@ -6,7 +6,11 @@ import { Label } from "@/components/ui/label";
 import { Check, AlertTriangle, Loader2, Ghost, Download, RefreshCw } from "lucide-react";
 import type { CasperStatus } from "@/lib/ghost";
 import { GhostMascot } from "@/lib/ghost";
-import type { EngineSettings } from "@/lib/api";
+import type { EngineDraft, EngineSettings } from "@/lib/api";
+
+export type EngineSettingsPayload = Partial<Omit<EngineSettings, "apiKey">> & {
+  apiKey?: string | null;
+};
 
 type EngineType = EngineSettings["engine"];
 
@@ -34,6 +38,7 @@ export function SettingsDialog({
   customBaseUrl,
   model,
   apiKey,
+  hasApiKey,
   ssh,
   onSave,
   onTest,
@@ -46,9 +51,10 @@ export function SettingsDialog({
   customBaseUrl: string;
   model: string;
   apiKey: string;
+  hasApiKey: boolean;
   ssh: { sshHost: string; sshUser: string; sshPort: string; sshKeyPath: string; serverGuiUrl: string };
-  onSave: (settings: EngineSettings) => void;
-  onTest: (url: string, opts?: { discover?: boolean }) => Promise<CasperStatus | void> | void;
+  onSave: (settings: EngineSettingsPayload) => Promise<void> | void;
+  onTest: (draft: EngineDraft) => Promise<CasperStatus | void> | void;
 }) {
   const [draftEngine, setDraftEngine] = useState<EngineType>(engine);
   const [draftUrl, setDraftUrl] = useState(ollamaUrl);
@@ -57,6 +63,8 @@ export function SettingsDialog({
   const [draftKey, setDraftKey] = useState(apiKey);
   const [draftSsh, setDraftSsh] = useState(ssh);
   const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const [update, setUpdate] = useState<{ type: string; version?: string; message?: string; percent?: number } | null>(null);
 
   const isElectron = typeof window !== "undefined" && Boolean((window as any).casperElectron?.isElectron);
@@ -69,6 +77,7 @@ export function SettingsDialog({
       setDraftModel(model);
       setDraftKey(apiKey);
       setDraftSsh(ssh);
+      setSaveError("");
     }
   }, [open, engine, ollamaUrl, customBaseUrl, model, apiKey, ssh]);
 
@@ -82,7 +91,7 @@ export function SettingsDialog({
       if (!keep || wasOtherDefault) setDraftUrl(LOCAL_DEFAULT_URLS[next]);
     }
     setDraftModel("");
-    setDraftKey(next === engine ? apiKey : "");
+    setDraftKey("");
     setDraftEngine(next);
   }
 
@@ -98,11 +107,39 @@ export function SettingsDialog({
   async function runTest(discover = false) {
     setTesting(true);
     try {
-      const result = await onTest(draftUrl, { discover });
-      if (result?.origin) setDraftUrl(result.origin);
+      const result = await onTest({
+        engine: draftEngine,
+        ollamaUrl: draftUrl,
+        customBaseUrl: draftCustomUrl,
+        apiKey: draftKey,
+        discover,
+      });
+      if (result?.origin && isLocal(draftEngine)) setDraftUrl(result.origin);
       if (result?.models?.length && !draftModel) setDraftModel(result.models[0]);
     } finally {
       setTesting(false);
+    }
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setSaveError("");
+    try {
+      await onSave({
+        engine: draftEngine,
+        ollamaUrl: draftUrl,
+        customBaseUrl: draftCustomUrl,
+        model: draftModel || (draftEngine === engine ? models[0] : "") || "",
+        // Empty means "keep the saved key" — unless the engine changed, in
+        // which case the old engine's key is explicitly cleared.
+        apiKey: draftKey || (draftEngine !== engine ? null : ""),
+        ...draftSsh,
+      });
+      onOpenChange(false);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Could not save settings.");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -269,7 +306,13 @@ export function SettingsDialog({
               autoComplete="off"
               value={draftKey}
               onChange={(e) => setDraftKey(e.target.value)}
-              placeholder={isLocal(draftEngine) ? "Only if your local server requires authentication" : "sk-..."}
+              placeholder={
+                hasApiKey && draftEngine === engine
+                  ? "Saved — leave blank to keep"
+                  : isLocal(draftEngine)
+                    ? "Only if your local server requires authentication"
+                    : "sk-..."
+              }
             />
             <p className="text-xs text-muted-foreground">
               {isLocal(draftEngine)
@@ -388,26 +431,22 @@ export function SettingsDialog({
           )}
         </div>
 
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            onClick={() => {
-              onSave({
-                engine: draftEngine,
-                ollamaUrl: draftUrl,
-                customBaseUrl: draftCustomUrl,
-                model: draftModel || (draftEngine === engine ? models[0] : "") || "",
-                apiKey: draftKey,
-                ...draftSsh,
-              });
-              onOpenChange(false);
-            }}
-          >
-            <Ghost className="w-4 h-4 mr-1" />
-            Save & haunt
-          </Button>
+        <DialogFooter className="flex-col gap-2 sm:flex-col">
+          {saveError && (
+            <p className="text-xs text-amber-500 w-full" data-testid="text-save-error">
+              <AlertTriangle className="w-3.5 h-3.5 inline mr-1" />
+              {saveError}
+            </p>
+          )}
+          <div className="flex justify-end gap-2 w-full">
+            <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Ghost className="w-4 h-4 mr-1" />}
+              Save & haunt
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

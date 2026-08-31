@@ -18,8 +18,10 @@ import {
   streamChat,
   agentStep,
   sshRun,
-  type EngineSettings,
+  testEngineSettings,
+  type EngineDraft,
 } from "@/lib/api";
+import type { EngineSettingsPayload } from "./SettingsDialog";
 import type { Tab, ChatMessage, CasperStatus } from "@/lib/ghost";
 import { uid, resolveAddress, hostOf, clampZoom, ZOOM_STEP } from "@/lib/ghost";
 import { runAgent, type AutonomyMode, type AgentToolbelt, type AgentAction } from "@/lib/agent";
@@ -538,7 +540,7 @@ export function BrowserApp() {
   const openBookmark = useCallback((url: string) => navigate(url), [navigate]);
 
   const handleSaveSettings = useCallback(
-    async (settings: EngineSettings) => {
+    async (settings: EngineSettingsPayload) => {
       await saveSettings(settings);
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
       await refreshStatus();
@@ -547,10 +549,12 @@ export function BrowserApp() {
   );
 
   const testConnection = useCallback(
-    async (url: string, opts?: { discover?: boolean }) => {
-      return refreshStatus(url, opts);
+    async (draft: EngineDraft) => {
+      const s = await testEngineSettings(draft).catch((): CasperStatus => ({ connected: false, baseUrl: "", models: [], demo: true }));
+      setStatus(s);
+      return s;
     },
-    [refreshStatus],
+    [],
   );
 
   return (
@@ -651,6 +655,7 @@ export function BrowserApp() {
         customBaseUrl={settingsQuery.data?.customBaseUrl ?? ""}
         model={model}
         apiKey={settingsQuery.data?.apiKey ?? ""}
+        hasApiKey={Boolean(settingsQuery.data?.hasApiKey)}
         ssh={sshSettings}
         onSave={handleSaveSettings}
         onTest={testConnection}

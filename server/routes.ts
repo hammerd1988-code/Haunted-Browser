@@ -195,7 +195,7 @@ function fromAppUi(origin: unknown): boolean {
 }
 
 export async function registerRoutes(_httpServer: Server, app: Express): Promise<Server> {
-  app.use(["/api/settings", "/api/ssh", "/api/agent", "/api/chat", "/api/bookmarks", "/api/history"], (req, res, next) => {
+  app.use(["/api/settings", "/api/ssh", "/api/agent", "/api/chat", "/api/bookmarks", "/api/history", "/api/status"], (req, res, next) => {
     if (req.method !== "GET" || req.originalUrl.startsWith("/api/settings")) {
       if (!fromAppUi(req.headers.origin)) {
         return res.status(403).json({ error: "forbidden" });
@@ -218,7 +218,8 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
       ollamaUrl: cfg.localUrl,
       customBaseUrl: cfg.customBaseUrl,
       model: cfg.model,
-      apiKey: cfg.apiKey,
+      apiKey: "",
+      hasApiKey: Boolean(cfg.apiKey),
       sshHost: ssh.host,
       sshUser: ssh.user,
       sshPort: String(ssh.port),
@@ -233,7 +234,10 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
     if (typeof ollamaUrl === "string") await storage.setSetting("ollamaUrl", stripToOrigin(ollamaUrl));
     if (typeof customBaseUrl === "string") await storage.setSetting("customBaseUrl", customBaseUrl.trim());
     if (typeof model === "string") await storage.setSetting("model", model);
-    if (typeof apiKey === "string") await storage.setSetting("apiKey", apiKey);
+    // The key is never echoed back to the UI, so an empty string means "keep
+    // the saved key"; an explicit null clears it.
+    if (apiKey === null) await storage.setSetting("apiKey", "");
+    else if (typeof apiKey === "string" && apiKey) await storage.setSetting("apiKey", apiKey);
     const { sshHost, sshUser, sshPort, sshKeyPath, serverGuiUrl } = req.body ?? {};
     if (typeof sshHost === "string") await storage.setSetting("sshHost", sshHost.trim());
     if (typeof sshUser === "string") await storage.setSetting("sshUser", sshUser.trim());
@@ -286,6 +290,30 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
       }
     }
     res.json({ ...probe, engine: cfg.engine });
+  });
+
+  // Probe a draft configuration from the settings dialog without persisting
+  // it, so "Test connection" reflects what the user is about to save.
+  app.post("/api/status/test", async (req, res) => {
+    const body = req.body ?? {};
+    const saved = await loadEngineConfig();
+    const engine: EngineType = isEngineType(body.engine) ? body.engine : saved.engine;
+    const cfg: EngineConfig = {
+      engine,
+      localUrl:
+        (typeof body.ollamaUrl === "string" && body.ollamaUrl.trim()) ||
+        LOCAL_DEFAULTS[engine] ||
+        DEFAULT_MODEL_URL,
+      customBaseUrl:
+        typeof body.customBaseUrl === "string" ? body.customBaseUrl.trim() : saved.customBaseUrl,
+      model: saved.model,
+      apiKey:
+        (typeof body.apiKey === "string" && body.apiKey) ||
+        (engine === saved.engine ? saved.apiKey : ""),
+    };
+    const discover = body.discover === true && isLocalEngine(engine);
+    const probe = await probeEngine(cfg, { discover });
+    res.json({ ...probe, engine });
   });
 
   app.get("/api/models", async (_req, res) => {

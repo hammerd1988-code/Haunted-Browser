@@ -45,7 +45,9 @@ export interface EngineSettings {
   ollamaUrl: string;
   customBaseUrl: string;
   model: string;
+  /** Always empty in responses — the server never echoes the saved key. */
   apiKey: string;
+  hasApiKey?: boolean;
   sshHost: string;
   sshUser: string;
   sshPort: string;
@@ -58,8 +60,23 @@ export async function fetchSettings(): Promise<EngineSettings> {
   return res.json();
 }
 
-export async function saveSettings(body: Partial<EngineSettings>) {
+export async function saveSettings(
+  body: Partial<Omit<EngineSettings, "apiKey">> & { apiKey?: string | null },
+) {
   await apiRequest("POST", "/api/settings", body);
+}
+
+export interface EngineDraft {
+  engine: EngineSettings["engine"];
+  ollamaUrl: string;
+  customBaseUrl: string;
+  apiKey: string;
+  discover?: boolean;
+}
+
+export async function testEngineSettings(draft: EngineDraft): Promise<CasperStatus> {
+  const res = await apiRequest("POST", "/api/status/test", draft);
+  return res.json();
 }
 
 export async function agentStep(
