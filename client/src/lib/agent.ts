@@ -304,11 +304,11 @@ async function executeAction(action: AgentAction, toolbelt: AgentToolbelt): Prom
       return `url: ${r.url}\ntitle: ${r.title}\npage text (truncated):\n${r.text.slice(0, 8000)}`;
     }
     case "serverStatus": {
-      const r = await toolbelt.sshRun("__STATUS__");
+      const r = await toolbelt.sshRun("__STATUS__").catch((e) => ({ ok: false, output: "", error: e instanceof Error ? e.message : String(e) }));
       return r.ok ? r.output : `ERROR: ${r.error || "server status check failed"}`;
     }
     case "sshRun": {
-      const r = await toolbelt.sshRun(String(action.args.command));
+      const r = await toolbelt.sshRun(String(action.args.command)).catch((e) => ({ ok: false, output: "", error: e instanceof Error ? e.message : String(e) }));
       const body = r.output.trim() ? r.output : "(no output)";
       return r.ok ? body : `ERROR: ${r.error || "command failed"}${r.output ? `\n${r.output}` : ""}`;
     }
@@ -406,11 +406,19 @@ export async function runAgent(opts: AgentRunOptions): Promise<void> {
         opts.onEvent({ type: "blocked", text: `Denied: ${resolved.describe}` });
       } else {
         observation = await executeAction(resolved, opts.toolbelt);
+        if (opts.signal?.aborted) {
+          opts.onEvent({ type: "error", text: "Agent run cancelled." });
+          return;
+        }
         opts.onEvent({ type: "observation", text: observation });
       }
     } else {
       if (resolved.mutating) opts.onEvent({ type: "action", text: resolved.describe, action: resolved });
       observation = await executeAction(resolved, opts.toolbelt);
+      if (opts.signal?.aborted) {
+        opts.onEvent({ type: "error", text: "Agent run cancelled." });
+        return;
+      }
       opts.onEvent({ type: "observation", text: observation });
       if (observation.startsWith("BLOCKED:")) {
         opts.onEvent({ type: "blocked", text: observation.slice(9).trim() });

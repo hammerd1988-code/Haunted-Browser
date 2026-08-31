@@ -38,6 +38,7 @@ export function runSsh(
   cfg: SshConfig,
   command: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<SshResult> {
   return new Promise((resolve) => {
     if (!cfg.host || !cfg.user) {
@@ -46,22 +47,36 @@ export function runSsh(
     const child = spawn("ssh", sshArgs(cfg, command), { windowsHide: true });
     let out = "";
     let err = "";
+    let settled = false;
+    const finish = (result: SshResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const onAbort = () => {
+      child.kill();
+      finish({ ok: false, output: out.slice(0, MAX_OUTPUT), error: "Cancelled." });
+    };
     const timer = setTimeout(() => {
       child.kill();
-      resolve({ ok: false, output: out.slice(0, MAX_OUTPUT), error: `Command timed out after ${Math.round(timeoutMs / 1000)}s.` });
+      finish({ ok: false, output: out.slice(0, MAX_OUTPUT), error: `Command timed out after ${Math.round(timeoutMs / 1000)}s.` });
     }, timeoutMs);
+    if (signal) {
+      if (signal.aborted) return onAbort();
+      signal.addEventListener("abort", onAbort);
+    }
     child.stdout.on("data", (d) => { if (out.length < MAX_OUTPUT) out += String(d); });
     child.stderr.on("data", (d) => { if (err.length < MAX_OUTPUT) err += String(d); });
     child.on("error", (e) => {
-      clearTimeout(timer);
-      resolve({ ok: false, output: "", error: `Could not run ssh: ${e.message}. Is OpenSSH installed?` });
+      finish({ ok: false, output: "", error: `Could not run ssh: ${e.message}. Is OpenSSH installed?` });
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
       if (code === 0) {
-        resolve({ ok: true, output: out.slice(0, MAX_OUTPUT) });
+        finish({ ok: true, output: out.slice(0, MAX_OUTPUT) });
       } else {
-        resolve({
+        finish({
           ok: false,
           output: out.slice(0, MAX_OUTPUT),
           error: err.trim().slice(0, 2000) || `ssh exited with code ${code}`,

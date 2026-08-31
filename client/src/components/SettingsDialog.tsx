@@ -397,7 +397,7 @@ export function SettingsDialog({
                 engine: draftEngine,
                 ollamaUrl: draftUrl,
                 customBaseUrl: draftCustomUrl,
-                model: draftModel || models[0] || "",
+                model: draftModel || (draftEngine === engine ? models[0] : "") || "",
                 apiKey: draftKey,
                 ...draftSsh,
               });

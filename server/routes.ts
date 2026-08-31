@@ -175,7 +175,35 @@ function sameLoopbackServer(a: string, b: string): boolean {
   }
 }
 
+// Reject state-changing requests from pages loaded inside the browser's
+// webviews: only the app's own UI (same-origin, so no Origin header, or the
+// loopback origin the shell is served from) may hit sensitive endpoints.
+// The server itself binds loopback-only (see index.ts); this closes the
+// remaining cross-origin gap for the settings, chat, agent, and SSH routes.
+function fromAppUi(origin: unknown): boolean {
+  if (typeof origin !== "string" || !origin) return true;
+  try {
+    const u = new URL(origin);
+    const port = String(parseInt(process.env.PORT || "5000", 10));
+    return (
+      (u.hostname === "127.0.0.1" || u.hostname === "localhost") &&
+      (u.port || "80") === port
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function registerRoutes(_httpServer: Server, app: Express): Promise<Server> {
+  app.use(["/api/settings", "/api/ssh", "/api/agent", "/api/chat"], (req, res, next) => {
+    if (req.method !== "GET" || req.path.startsWith("/api/settings")) {
+      if (!fromAppUi(req.headers.origin)) {
+        return res.status(403).json({ error: "forbidden" });
+      }
+    }
+    next();
+  });
+
   // ---- Liveness (must stay cheap — Electron polls this to know the app is up) ----
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true });
@@ -236,7 +264,11 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
     if (!command.trim()) return res.status(400).json({ ok: false, error: "command required" });
     if (command.length > 2000) return res.status(400).json({ ok: false, error: "command too long" });
     const ssh = await loadSshConfig();
-    const r = await runSsh(ssh, command === "__STATUS__" ? STATUS_COMMAND : command);
+    const ctrl = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) ctrl.abort();
+    });
+    const r = await runSsh(ssh, command === "__STATUS__" ? STATUS_COMMAND : command, undefined, ctrl.signal);
     res.json(r);
   });
 

@@ -235,9 +235,10 @@ export function CasperPanel({
           <button
             key={a.label}
             type="button"
+            disabled={busy}
             onClick={() => onSend(a.prompt, { injectPage: a.inject })}
             className={cx(
-              "shrink-0 flex items-center gap-1.5 h-8 px-2.5 rounded-full text-xs transition-colors",
+              "shrink-0 flex items-center gap-1.5 h-8 px-2.5 rounded-full text-xs transition-colors disabled:opacity-40 disabled:pointer-events-none",
               a.inject
                 ? "bg-primary/15 text-primary hover:bg-primary/25"
                 : "bg-accent/60 text-muted-foreground hover:text-foreground hover:bg-accent",

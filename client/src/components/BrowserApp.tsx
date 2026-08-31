@@ -358,7 +358,10 @@ export function BrowserApp() {
         finalText = `${text}\n\n(Note: I can't read the active page's text here. In the Casper desktop app I read the page you're viewing directly — install it to use this with live pages.)`;
       }
       const userMsgFinal = { ...userMsg, content: finalText };
-      const apiMessages = [...messages, ...contextMessages, userMsgFinal];
+      // Agent-run traces (thoughts/actions/observations) stay visible in the
+      // panel but are internal — keep them out of the chat context sent upstream.
+      const chatHistory = messages.filter((m) => !m.kind);
+      const apiMessages = [...chatHistory, ...contextMessages, userMsgFinal];
       setMessages((prev) => [...prev, userMsg, { id: asstId, role: "assistant", content: "", pending: true }]);
       setStreaming(true);
 
@@ -446,7 +449,7 @@ export function BrowserApp() {
         get executeInPage() {
           return pageExecutorRef.current;
         },
-        sshRun: (command: string) => sshRun(command),
+        sshRun: (command: string) => sshRun(command, ctrl.signal),
         serverGuiUrl: settingsQuery.data?.serverGuiUrl || "",
       };
 

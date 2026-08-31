@@ -77,11 +77,15 @@ export async function agentStep(
   return res.json();
 }
 
-export async function sshRun(command: string): Promise<{ ok: boolean; output: string; error?: string }> {
+export async function sshRun(
+  command: string,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; output: string; error?: string }> {
   const res = await fetch(`${API_BASE}/api/ssh/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command }),
+    signal,
   });
   return res.json();
 }
