@@ -132,6 +132,8 @@ export interface ChatMessage {
   content: string;
   demo?: boolean;
   pending?: boolean;
+  /** Agent-run step messages get special rendering in the panel. */
+  kind?: "thought" | "action" | "observation" | "blocked" | "approval";
 }
 
 export interface CasperStatus {

@@ -152,6 +152,52 @@ export async function fetchModels(
   }
 }
 
+/**
+ * Probe a remote (cloud or custom) OpenAI-compatible server. Unlike local
+ * probing there is no discovery or loopback rewriting — just list models at
+ * the given base. A failed /models listing on a cloud engine is not fatal
+ * (some proxies gate it), so callers may treat "unauthorized" as the only
+ * hard failure.
+ */
+export async function probeRemoteServer(opts: {
+  baseUrl: string;
+  apiKey?: string | null;
+  timeoutMs?: number;
+}): Promise<ProbeResult> {
+  const baseUrl = opts.baseUrl.replace(/\/+$/, "");
+  const origin = stripToOrigin(baseUrl);
+  try {
+    const models = await fetchModels(baseUrl, {
+      timeoutMs: opts.timeoutMs ?? 6000,
+      apiKey: opts.apiKey,
+    });
+    return { connected: true, demo: false, baseUrl, origin, models };
+  } catch (err) {
+    const status = (err as { status?: number })?.status;
+    if (status === 401 || status === 403) {
+      return {
+        connected: false,
+        demo: true,
+        baseUrl,
+        origin,
+        models: [],
+        error: "The API rejected your key",
+        hint: "Check the API key in Casper Settings — it must be valid for the selected engine.",
+      };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      connected: false,
+      demo: true,
+      baseUrl,
+      origin,
+      models: [],
+      error: `Could not reach ${origin} (${msg})`,
+      hint: "Check your internet connection and the base URL for the selected engine.",
+    };
+  }
+}
+
 export async function probeModelServer(opts: {
   url?: string;
   apiKey?: string | null;

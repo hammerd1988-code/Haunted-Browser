@@ -6,12 +6,27 @@ import { Label } from "@/components/ui/label";
 import { Check, AlertTriangle, Loader2, Ghost, Download, RefreshCw } from "lucide-react";
 import type { CasperStatus } from "@/lib/ghost";
 import { GhostMascot } from "@/lib/ghost";
+import type { EngineSettings } from "@/lib/api";
+
+type EngineType = EngineSettings["engine"];
+
+const ENGINE_OPTIONS: { value: EngineType; label: string }[] = [
+  { value: "lmstudio", label: "Local — LM Studio" },
+  { value: "ollama", label: "Local — Ollama" },
+  { value: "openai", label: "Cloud — OpenAI" },
+  { value: "openrouter", label: "Cloud — OpenRouter" },
+  { value: "custom", label: "Custom — OpenAI-compatible URL" },
+];
+
+const isLocal = (e: EngineType) => e === "lmstudio" || e === "ollama";
 
 export function SettingsDialog({
   open,
   onOpenChange,
   status,
+  engine,
   ollamaUrl,
+  customBaseUrl,
   model,
   apiKey,
   onSave,
@@ -20,13 +35,17 @@ export function SettingsDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   status: CasperStatus;
+  engine: EngineType;
   ollamaUrl: string;
+  customBaseUrl: string;
   model: string;
   apiKey: string;
-  onSave: (ollamaUrl: string, model: string, apiKey: string) => void;
+  onSave: (settings: EngineSettings) => void;
   onTest: (url: string, opts?: { discover?: boolean }) => Promise<CasperStatus | void> | void;
 }) {
+  const [draftEngine, setDraftEngine] = useState<EngineType>(engine);
   const [draftUrl, setDraftUrl] = useState(ollamaUrl);
+  const [draftCustomUrl, setDraftCustomUrl] = useState(customBaseUrl);
   const [draftModel, setDraftModel] = useState(model);
   const [draftKey, setDraftKey] = useState(apiKey);
   const [testing, setTesting] = useState(false);
@@ -36,11 +55,13 @@ export function SettingsDialog({
 
   useEffect(() => {
     if (open) {
+      setDraftEngine(engine);
       setDraftUrl(ollamaUrl);
+      setDraftCustomUrl(customBaseUrl);
       setDraftModel(model);
       setDraftKey(apiKey);
     }
-  }, [open, ollamaUrl, model, apiKey]);
+  }, [open, engine, ollamaUrl, customBaseUrl, model, apiKey]);
 
   useEffect(() => {
     const bridge = (window as any).casperElectron;
@@ -70,27 +91,69 @@ export function SettingsDialog({
             <GhostMascot size={28} glow />
             <div>
               <DialogTitle className="font-[family-name:var(--font-display)]">Casper Settings</DialogTitle>
-              <DialogDescription>Connect your local model server</DialogDescription>
+              <DialogDescription>Dealer's choice — pick Casper's brain</DialogDescription>
             </div>
           </div>
         </DialogHeader>
 
         <div className="space-y-5 py-2">
           <div className="space-y-2">
-            <Label htmlFor="ollama-url">Model server URL</Label>
-            <Input
-              id="ollama-url"
-              data-testid="input-ollama-url"
-              value={draftUrl}
-              onChange={(e) => setDraftUrl(e.target.value)}
-              placeholder="http://127.0.0.1:1234"
-            />
+            <Label htmlFor="engine">Engine</Label>
+            <select
+              id="engine"
+              data-testid="select-engine"
+              value={draftEngine}
+              onChange={(e) => setDraftEngine(e.target.value as EngineType)}
+              className="flex h-10 w-full rounded-md border border-input bg-background/70 px-3 text-sm outline-none focus:border-primary/60"
+            >
+              {ENGINE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
             <p className="text-xs text-muted-foreground">
-              LM Studio: open the <strong>Developer</strong> tab, start the local server, and load a
-              chat model. Default is <code className="font-mono">http://127.0.0.1:1234</code>. Ollama
-              uses <code className="font-mono">http://127.0.0.1:11434</code>.
+              Casper works the same on every engine — local models keep everything private, cloud
+              models bring more horsepower.
             </p>
           </div>
+
+          {isLocal(draftEngine) && (
+            <div className="space-y-2">
+              <Label htmlFor="ollama-url">Local server URL</Label>
+              <Input
+                id="ollama-url"
+                data-testid="input-ollama-url"
+                value={draftUrl}
+                onChange={(e) => setDraftUrl(e.target.value)}
+                placeholder={draftEngine === "ollama" ? "http://127.0.0.1:11434" : "http://127.0.0.1:1234"}
+              />
+              <p className="text-xs text-muted-foreground">
+                {draftEngine === "ollama" ? (
+                  <>Ollama serves on <code className="font-mono">http://127.0.0.1:11434</code> by default.</>
+                ) : (
+                  <>LM Studio: open the <strong>Developer</strong> tab, start the local server, and load a
+                  chat model. Default is <code className="font-mono">http://127.0.0.1:1234</code>.</>
+                )}
+              </p>
+            </div>
+          )}
+
+          {draftEngine === "custom" && (
+            <div className="space-y-2">
+              <Label htmlFor="custom-url">OpenAI-compatible base URL</Label>
+              <Input
+                id="custom-url"
+                data-testid="input-custom-url"
+                value={draftCustomUrl}
+                onChange={(e) => setDraftCustomUrl(e.target.value)}
+                placeholder="https://my-proxy.example.com/v1"
+              />
+              <p className="text-xs text-muted-foreground">
+                Any server that speaks the OpenAI chat-completions API.
+              </p>
+            </div>
+          )}
 
           <div className="space-y-2">
             <Label>Connection</Label>
@@ -166,13 +229,16 @@ export function SettingsDialog({
               />
             )}
             <p className="text-xs text-muted-foreground">
-              Pick a model from your LM Studio / Ollama server, or type a name. The loaded model is used
-              automatically.
+              {isLocal(draftEngine)
+                ? "Pick a model from your local server, or type a name. The loaded model is used automatically."
+                : draftEngine === "openrouter"
+                  ? "e.g. openai/gpt-4o-mini, anthropic/claude-3.5-sonnet"
+                  : "e.g. gpt-4o-mini, gpt-4o"}
             </p>
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="api-key">API token (optional)</Label>
+            <Label htmlFor="api-key">{isLocal(draftEngine) ? "API token (optional)" : "API key"}</Label>
             <Input
               id="api-key"
               data-testid="input-api-key"
@@ -180,10 +246,12 @@ export function SettingsDialog({
               autoComplete="off"
               value={draftKey}
               onChange={(e) => setDraftKey(e.target.value)}
-              placeholder="Only if LM Studio requires authentication"
+              placeholder={isLocal(draftEngine) ? "Only if your local server requires authentication" : "sk-..."}
             />
             <p className="text-xs text-muted-foreground">
-              Leave blank unless you enabled an API token in LM Studio → Developer → server settings.
+              {isLocal(draftEngine)
+                ? "Leave blank unless your local server requires an API token."
+                : "Stored locally in Haunted Browser's settings — never sent anywhere except the engine you chose."}
             </p>
           </div>
 
@@ -259,7 +327,13 @@ export function SettingsDialog({
           </Button>
           <Button
             onClick={() => {
-              onSave(draftUrl, draftModel || models[0] || "", draftKey);
+              onSave({
+                engine: draftEngine,
+                ollamaUrl: draftUrl,
+                customBaseUrl: draftCustomUrl,
+                model: draftModel || models[0] || "",
+                apiKey: draftKey,
+              });
               onOpenChange(false);
             }}
           >

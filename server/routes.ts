@@ -5,8 +5,18 @@ import {
   DEFAULT_MODEL_URL,
   modelHeaders,
   probeModelServer,
+  probeRemoteServer,
   stripToOrigin,
 } from "./model-server";
+import {
+  CLOUD_BASES,
+  CLOUD_MODEL_SUGGESTIONS,
+  LOCAL_DEFAULTS,
+  isEngineType,
+  isLocalEngine,
+  type EngineConfig,
+  type EngineType,
+} from "./engines";
 
 /* ------------------------------------------------------------------ */
 /* Casper — the ghost who haunts Haunted Browser.                      */
@@ -83,23 +93,63 @@ function buildCasperPrompt(opts: { localHour?: number; history: { role: string; 
 }
 
 
-async function loadModelSettings() {
+async function loadEngineConfig(): Promise<EngineConfig> {
   const all = await storage.getAllSettings();
+  const engine: EngineType = isEngineType(all.engine) ? all.engine : "lmstudio";
   return {
-    ollamaUrl: all.ollamaUrl || DEFAULT_MODEL_URL,
+    engine,
+    localUrl: all.ollamaUrl || LOCAL_DEFAULTS[engine] || DEFAULT_MODEL_URL,
+    customBaseUrl: all.customBaseUrl || "",
     model: all.model || "",
     apiKey: all.apiKey || "",
   };
 }
 
-async function probeSavedServer(opts: { url?: string; discover?: boolean; timeoutMs?: number } = {}) {
-  const saved = await loadModelSettings();
-  return probeModelServer({
-    url: opts.url || saved.ollamaUrl,
-    apiKey: saved.apiKey,
-    discover: opts.discover,
+function remoteBaseFor(cfg: EngineConfig): string {
+  if (cfg.engine === "custom") {
+    const raw = (cfg.customBaseUrl || "").trim().replace(/\/+$/, "");
+    return /\/v\d+$/i.test(raw) ? raw : `${raw}/v1`;
+  }
+  return CLOUD_BASES[cfg.engine];
+}
+
+async function probeEngine(
+  cfg: EngineConfig,
+  opts: { url?: string; discover?: boolean; timeoutMs?: number } = {},
+) {
+  if (isLocalEngine(cfg.engine)) {
+    return probeModelServer({
+      url: opts.url || cfg.localUrl,
+      apiKey: cfg.apiKey,
+      discover: opts.discover,
+      timeoutMs: opts.timeoutMs,
+    });
+  }
+  if (cfg.engine === "custom" && !(cfg.customBaseUrl || "").trim()) {
+    return {
+      connected: false,
+      demo: true,
+      baseUrl: "",
+      origin: "",
+      models: [] as string[],
+      error: "No base URL configured",
+      hint: "Enter your custom OpenAI-compatible base URL in Casper Settings.",
+    };
+  }
+  const probe = await probeRemoteServer({
+    baseUrl: remoteBaseFor(cfg),
+    apiKey: cfg.apiKey,
     timeoutMs: opts.timeoutMs,
   });
+  if (probe.connected && probe.models.length === 0) {
+    probe.models = CLOUD_MODEL_SUGGESTIONS[cfg.engine] || [];
+  }
+  return probe;
+}
+
+async function probeSavedServer(opts: { url?: string; discover?: boolean; timeoutMs?: number } = {}) {
+  const cfg = await loadEngineConfig();
+  return probeEngine(cfg, opts);
 }
 
 function sameLoopbackServer(a: string, b: string): boolean {
@@ -121,13 +171,21 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
 
   // ---- Settings ----
   app.get("/api/settings", async (_req, res) => {
-    const saved = await loadModelSettings();
-    res.json(saved);
+    const cfg = await loadEngineConfig();
+    res.json({
+      engine: cfg.engine,
+      ollamaUrl: cfg.localUrl,
+      customBaseUrl: cfg.customBaseUrl,
+      model: cfg.model,
+      apiKey: cfg.apiKey,
+    });
   });
 
   app.post("/api/settings", async (req, res) => {
-    const { ollamaUrl, model, apiKey } = req.body ?? {};
+    const { engine, ollamaUrl, customBaseUrl, model, apiKey } = req.body ?? {};
+    if (isEngineType(engine)) await storage.setSetting("engine", engine);
     if (typeof ollamaUrl === "string") await storage.setSetting("ollamaUrl", stripToOrigin(ollamaUrl));
+    if (typeof customBaseUrl === "string") await storage.setSetting("customBaseUrl", customBaseUrl.trim());
     if (typeof model === "string") await storage.setSetting("model", model);
     if (typeof apiKey === "string") await storage.setSetting("apiKey", apiKey);
     res.json({ ok: true });
@@ -137,16 +195,16 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
   app.get("/api/status", async (req, res) => {
     const discover = req.query.discover === "1" || req.query.discover === "true";
     const raw = (req.query.url as string) || undefined;
-    const probe = await probeSavedServer({ url: raw, discover });
-    if (probe.connected && !raw) {
-      const saved = await loadModelSettings();
+    const cfg = await loadEngineConfig();
+    const probe = await probeEngine(cfg, { url: raw, discover });
+    if (probe.connected && !raw && isLocalEngine(cfg.engine)) {
       // Persist 127.0.0.1 when localhost was only failing because of IPv6,
       // so later chat requests hit the address that actually worked.
-      if (saved.ollamaUrl !== probe.origin && sameLoopbackServer(saved.ollamaUrl, probe.origin)) {
+      if (cfg.localUrl !== probe.origin && sameLoopbackServer(cfg.localUrl, probe.origin)) {
         await storage.setSetting("ollamaUrl", probe.origin);
       }
     }
-    res.json(probe);
+    res.json({ ...probe, engine: cfg.engine });
   });
 
   app.get("/api/models", async (_req, res) => {
@@ -252,15 +310,19 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
         ? ((Math.floor(req.body.localHour) % 24) + 24) % 24
         : undefined;
 
-    const saved = await loadModelSettings();
-    const probe = await probeSavedServer({ timeoutMs: 4000 });
+    const saved = await loadEngineConfig();
+    const probe = await probeEngine(saved, { timeoutMs: 4000 });
     let chosenModel = (typeof model === "string" && model) || saved.model || "";
     // LM Studio returns 400 for an empty/unknown model id — prefer one the
     // server actually listed, including when an old default like llama3.2
     // was saved before a real model was loaded.
-    if (!chosenModel || (probe.models.length > 0 && !probe.models.includes(chosenModel))) {
+    if (
+      isLocalEngine(saved.engine) &&
+      (!chosenModel || (probe.models.length > 0 && !probe.models.includes(chosenModel)))
+    ) {
       chosenModel = probe.models[0] || chosenModel;
     }
+    if (!chosenModel) chosenModel = probe.models[0] || "";
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -290,7 +352,9 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
 
     if (!chosenModel) {
       send({
-        error: "LM Studio is reachable but no model is loaded. Load a chat model, then try again.",
+        error: isLocalEngine(saved.engine)
+          ? "The model server is reachable but no model is loaded. Load a chat model, then try again."
+          : "No model selected. Pick or type a model name in Casper Settings.",
         done: true,
       });
       return res.end();
@@ -319,7 +383,7 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
       if (!upstream.ok || !upstream.body) {
         const detail = (await upstream.text().catch(() => "")).slice(0, 400);
         send({
-          error: `LM Studio returned HTTP ${upstream.status}${detail ? `: ${detail}` : ""}. Check that "${chosenModel}" is loaded.`,
+          error: `The model server returned HTTP ${upstream.status}${detail ? `: ${detail}` : ""}. Check that "${chosenModel}" is available on the selected engine.`,
           done: true,
         });
         return res.end();
@@ -371,6 +435,68 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
       }
       send({ error: "lost connection to model server", done: true });
       return res.end();
+    }
+  });
+
+  // ---- Agent step (non-streaming) ----
+  // One turn of Casper's agent loop. The client owns the tool registry and
+  // executes tools inside the browser; this endpoint just runs the model with
+  // the client-built conversation (which includes the tool-protocol system
+  // prompt and prior observations) and returns the raw completion for the
+  // client to parse into a tool call or a final answer.
+  app.post("/api/agent/step", async (req, res) => {
+    const { messages, model } = req.body ?? {};
+    const history = Array.isArray(messages) ? messages : [];
+    const cleanHistory = history
+      .filter((m) => ["system", "user", "assistant"].includes(m?.role) && typeof m?.content === "string")
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    const saved = await loadEngineConfig();
+    const probe = await probeEngine(saved, { timeoutMs: 4000 });
+    if (!probe.connected) {
+      return res.json({
+        error: probe.error || "No model server reachable",
+        hint: probe.hint,
+        demo: true,
+      });
+    }
+
+    let chosenModel = (typeof model === "string" && model) || saved.model || "";
+    if (
+      isLocalEngine(saved.engine) &&
+      (!chosenModel || (probe.models.length > 0 && !probe.models.includes(chosenModel)))
+    ) {
+      chosenModel = probe.models[0] || chosenModel;
+    }
+    if (!chosenModel) chosenModel = probe.models[0] || "";
+    if (!chosenModel) {
+      return res.json({ error: "No model selected — pick one in Casper Settings." });
+    }
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 120_000);
+    req.on("close", () => ctrl.abort());
+    try {
+      const upstream = await fetch(`${probe.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: modelHeaders(saved.apiKey),
+        body: JSON.stringify({ model: chosenModel, stream: false, messages: cleanHistory }),
+        signal: ctrl.signal,
+      });
+      if (!upstream.ok) {
+        const detail = (await upstream.text().catch(() => "")).slice(0, 400);
+        return res.json({
+          error: `The model server returned HTTP ${upstream.status}${detail ? `: ${detail}` : ""}.`,
+        });
+      }
+      const json: any = await upstream.json();
+      const content = json?.choices?.[0]?.message?.content ?? "";
+      return res.json({ content, model: chosenModel });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return res.json({ error: /abort/i.test(msg) ? "Agent step timed out" : msg });
+    } finally {
+      clearTimeout(timer);
     }
   });
 

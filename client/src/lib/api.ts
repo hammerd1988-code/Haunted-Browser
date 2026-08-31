@@ -40,13 +40,34 @@ export async function clearHistory() {
   await apiRequest("DELETE", "/api/history");
 }
 
-export async function fetchSettings(): Promise<{ ollamaUrl: string; model: string; apiKey: string }> {
+export interface EngineSettings {
+  engine: "lmstudio" | "ollama" | "openai" | "openrouter" | "custom";
+  ollamaUrl: string;
+  customBaseUrl: string;
+  model: string;
+  apiKey: string;
+}
+
+export async function fetchSettings(): Promise<EngineSettings> {
   const res = await apiRequest("GET", "/api/settings");
   return res.json();
 }
 
-export async function saveSettings(body: { ollamaUrl: string; model: string; apiKey?: string }) {
+export async function saveSettings(body: Partial<EngineSettings>) {
   await apiRequest("POST", "/api/settings", body);
+}
+
+export async function agentStep(
+  messages: { role: string; content: string }[],
+  model: string,
+): Promise<{ content?: string; error?: string; hint?: string; demo?: boolean }> {
+  const res = await fetch(`${API_BASE}/api/agent/step`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, model }),
+  });
+  if (!res.ok) return { error: `Agent request failed (${res.status})` };
+  return res.json();
 }
 
 export async function probeUrl(url: string): Promise<{ embeddable: boolean; reason?: string; finalUrl?: string }> {
