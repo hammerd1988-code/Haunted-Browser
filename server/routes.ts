@@ -153,7 +153,9 @@ async function loadSshConfig(): Promise<SshConfig & { guiUrl: string }> {
   return {
     host: all.sshHost || "",
     user: all.sshUser || "",
-    port: parseInt(all.sshPort || "22", 10) || 22,
+    // Only an empty setting defaults to 22 — anything else must be a plain
+    // decimal port, otherwise NaN flows through so validSshConfig rejects it.
+    port: !all.sshPort?.trim() ? 22 : /^\d{1,5}$/.test(all.sshPort.trim()) ? parseInt(all.sshPort.trim(), 10) : NaN,
     keyPath: all.sshKeyPath || "",
     guiUrl: all.serverGuiUrl || "",
   };
@@ -222,7 +224,7 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
       hasApiKey: Boolean(cfg.apiKey),
       sshHost: ssh.host,
       sshUser: ssh.user,
-      sshPort: String(ssh.port),
+      sshPort: Number.isNaN(ssh.port) ? "" : String(ssh.port),
       sshKeyPath: ssh.keyPath,
       serverGuiUrl: ssh.guiUrl,
     });
@@ -241,7 +243,13 @@ export async function registerRoutes(_httpServer: Server, app: Express): Promise
     const { sshHost, sshUser, sshPort, sshKeyPath, serverGuiUrl } = req.body ?? {};
     if (typeof sshHost === "string") await storage.setSetting("sshHost", sshHost.trim());
     if (typeof sshUser === "string") await storage.setSetting("sshUser", sshUser.trim());
-    if (typeof sshPort === "string") await storage.setSetting("sshPort", sshPort.trim());
+    if (typeof sshPort === "string") {
+      const p = sshPort.trim();
+      if (p && (!/^\d{1,5}$/.test(p) || parseInt(p, 10) < 1 || parseInt(p, 10) > 65535)) {
+        return res.status(400).json({ error: "SSH port must be a number between 1 and 65535." });
+      }
+      await storage.setSetting("sshPort", p);
+    }
     if (typeof sshKeyPath === "string") await storage.setSetting("sshKeyPath", sshKeyPath.trim());
     if (typeof serverGuiUrl === "string") await storage.setSetting("serverGuiUrl", serverGuiUrl.trim());
     res.json({ ok: true });
