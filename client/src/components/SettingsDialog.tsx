@@ -65,6 +65,7 @@ export function SettingsDialog({
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [clearKey, setClearKey] = useState(false);
   const [update, setUpdate] = useState<{ type: string; version?: string; message?: string; percent?: number } | null>(null);
 
   const isElectron = typeof window !== "undefined" && Boolean((window as any).casperElectron?.isElectron);
@@ -78,6 +79,7 @@ export function SettingsDialog({
       setDraftKey(apiKey);
       setDraftSsh(ssh);
       setSaveError("");
+      setClearKey(false);
     }
   }, [open, engine, ollamaUrl, customBaseUrl, model, apiKey, ssh]);
 
@@ -92,6 +94,7 @@ export function SettingsDialog({
     }
     setDraftModel("");
     setDraftKey("");
+    setClearKey(false);
     setDraftEngine(next);
   }
 
@@ -102,7 +105,10 @@ export function SettingsDialog({
     return () => off && off();
   }, []);
 
-  const models = status.models;
+  // Only trust the probed model list when it came from the engine being
+  // edited — after testing another engine, status.models belongs to it.
+  const statusEngine = status.engine || engine;
+  const models = statusEngine === draftEngine ? status.models : [];
 
   async function runTest(discover = false) {
     setTesting(true);
@@ -129,10 +135,10 @@ export function SettingsDialog({
         engine: draftEngine,
         ollamaUrl: draftUrl,
         customBaseUrl: draftCustomUrl,
-        model: draftModel || (draftEngine === engine ? models[0] : "") || "",
-        // Empty means "keep the saved key" — unless the engine changed, in
-        // which case the old engine's key is explicitly cleared.
-        apiKey: draftKey || (draftEngine !== engine ? null : ""),
+        model: draftModel || models[0] || "",
+        // Empty means "keep the saved key"; null clears it — sent when the
+        // engine changed or the user explicitly cleared the key.
+        apiKey: draftKey || (draftEngine !== engine || clearKey ? null : ""),
         ...draftSsh,
       });
       onOpenChange(false);
@@ -145,7 +151,7 @@ export function SettingsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="glass-strong border-border max-w-md">
+      <DialogContent className="glass-strong border-border max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
             <GhostMascot size={28} glow />
@@ -305,15 +311,30 @@ export function SettingsDialog({
               type="password"
               autoComplete="off"
               value={draftKey}
-              onChange={(e) => setDraftKey(e.target.value)}
+              onChange={(e) => {
+                setDraftKey(e.target.value);
+                if (e.target.value) setClearKey(false);
+              }}
               placeholder={
-                hasApiKey && draftEngine === engine
+                hasApiKey && draftEngine === engine && !clearKey
                   ? "Saved — leave blank to keep"
                   : isLocal(draftEngine)
                     ? "Only if your local server requires authentication"
                     : "sk-..."
               }
             />
+            {hasApiKey && draftEngine === engine && !draftKey && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-testid="button-clear-key"
+                className={clearKey ? "text-amber-500" : ""}
+                onClick={() => setClearKey((v) => !v)}
+              >
+                {clearKey ? "Key will be removed on save — undo" : "Remove saved key"}
+              </Button>
+            )}
             <p className="text-xs text-muted-foreground">
               {isLocal(draftEngine)
                 ? "Leave blank unless your local server requires an API token."

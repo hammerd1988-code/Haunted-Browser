@@ -200,6 +200,18 @@ export function ElectronViewport({
       if (!wv || typeof wv.executeJavaScript !== "function") {
         return Promise.reject(new Error("page not ready"));
       }
+      // The webview can still be showing the previous document while a
+      // navigation is committing; only run scripts once the committed URL
+      // matches the tab's URL so an action never hits the wrong page.
+      try {
+        const current = typeof wv.getURL === "function" ? wv.getURL() : "";
+        const same = current && (current === url || current.split("#")[0] === url.split("#")[0]);
+        if (!same || (typeof wv.isLoading === "function" && wv.isLoading())) {
+          return Promise.reject(new Error("page is still loading — readPage or retry once it settles"));
+        }
+      } catch {
+        return Promise.reject(new Error("page not ready"));
+      }
       return wv.executeJavaScript(code);
     });
     return () => onExecutor(null);

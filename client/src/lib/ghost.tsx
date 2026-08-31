@@ -138,6 +138,8 @@ export interface ChatMessage {
 
 export interface CasperStatus {
   connected: boolean;
+  /** Which engine this status/model list was probed from. */
+  engine?: string;
   baseUrl: string;
   origin?: string;
   models: string[];

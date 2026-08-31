@@ -22,6 +22,17 @@ export interface SshResult {
 const MAX_OUTPUT = 20_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+// Values that reach the ssh argv must never start with "-", or OpenSSH would
+// parse them as options (e.g. a host of "-oProxyCommand=..." runs a local
+// command). Ports must be numeric.
+export function validSshConfig(cfg: SshConfig): string | null {
+  if (cfg.host.startsWith("-")) return "Invalid SSH host.";
+  if (cfg.user.startsWith("-") || cfg.user.includes("@")) return "Invalid SSH user.";
+  if (cfg.keyPath.startsWith("-")) return "Invalid SSH key path.";
+  if (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535) return "Invalid SSH port.";
+  return null;
+}
+
 export function sshArgs(cfg: SshConfig, command: string): string[] {
   const args = [
     "-o", "BatchMode=yes",
@@ -30,7 +41,7 @@ export function sshArgs(cfg: SshConfig, command: string): string[] {
     "-p", String(cfg.port || 22),
   ];
   if (cfg.keyPath) args.push("-i", cfg.keyPath);
-  args.push(`${cfg.user}@${cfg.host}`, command);
+  args.push("--", `${cfg.user}@${cfg.host}`, command);
   return args;
 }
 
@@ -43,6 +54,10 @@ export function runSsh(
   return new Promise((resolve) => {
     if (!cfg.host || !cfg.user) {
       return resolve({ ok: false, output: "", error: "No server node configured — set host and user in Casper Settings." });
+    }
+    const invalid = validSshConfig(cfg);
+    if (invalid) {
+      return resolve({ ok: false, output: "", error: `${invalid} Check the server node fields in Casper Settings.` });
     }
     const child = spawn("ssh", sshArgs(cfg, command), { windowsHide: true });
     let out = "";
