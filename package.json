@@ -115,7 +115,7 @@
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.0",
     "drizzle-kit": "^0.31.8",
-    "electron": "^39.8.10",
+    "electron": "^41.10.6",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "postcss": "^8.4.47",
